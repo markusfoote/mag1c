@@ -1,0 +1,4 @@
+torch >= 1.2
+spectral >= 0.19
+numpy
+scipy

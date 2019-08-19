@@ -96,7 +96,7 @@ def acrwl1mf(x: torch.Tensor,
     xmean = x - mu
     C = torch.div(torch.bmm(torch.transpose(xmean, 1, 2), xmean), N)  # [b x s x p] * [b x p x s] = [b x s x s]
     # Cit, _ = torch.gesv(torch.transpose(target, 1, 2), C)  # [b x s x 1] \ [b x s x s] = [b x s x 1]
-    Cit = torch.potrs(torch.transpose(target, 1, 2), torch.cholesky(C), upper=False)
+    Cit = torch.cholesky_solve(torch.transpose(target, 1, 2), torch.cholesky(C, upper=False), upper=False)
     normalizer = torch.bmm(target, Cit)  # [b x 1 x s] * [b x s x 1] = [b x 1 x 1]
     mf = torch.div(torch.bmm(xmean, Cit), torch.mul(R, normalizer))  # [b x p x s] * [b x s x 1] = [b x p x 1]
     if not zero_override:
@@ -112,7 +112,7 @@ def acrwl1mf(x: torch.Tensor,
         target = torch.mul(template, mu, out=target)
         xmean = torch.add(modx, -1, mu, out=xmean)
         C = torch.div(torch.bmm(torch.transpose(xmean, 1, 2), xmean), N, out=C)
-        Cit = torch.potrs(torch.transpose(target, 1, 2), torch.cholesky(C), upper=False)
+        Cit = torch.cholesky_solve(torch.transpose(target, 1, 2), torch.cholesky(C, upper=False), upper=False)
         # Compute matched filter with regularization
         normalizer = torch.bmm(target, Cit, out=normalizer)
         if torch.sum(torch.lt(normalizer, 1)):
@@ -268,6 +268,66 @@ class GroupedRadianceMemmappedFileDataset(torch.utils.data.Dataset):
         return data, censor_mask, col_idx, load_time
 
 
+class GeocorrectedGroupedRadianceMemmappedFileDataset(torch.utils.data.Dataset):
+    def __init__(self,
+                 rdn_memmap_file: np.core.memmap,
+                 band_keep: np.ndarray,
+                 group_size: int,
+                 src_glt_memmap_file: np.core.memmap) -> None:
+        self.rdn_file = rdn_memmap_file
+        self.band_keep_mask = band_keep
+        self.group_size = group_size
+        self.glt_file = src_glt_memmap_file
+        # Determine number of partitions from the group size request and size of original rdn represented in glt
+        abs_glt = np.absolute(self.glt_file)
+        nonzero_glt_lines = abs_glt[abs_glt[:, :, 1] > 0, 1]
+        nonzero_glt_samples = abs_glt[abs_glt[:, :, 0] > 0, 0]
+        self.num_lines = nonzero_glt_lines.max() - nonzero_glt_lines.min() + 1
+        self.num_samples = nonzero_glt_samples.max() - nonzero_glt_samples.min() + 1
+        self.num_bands = self.rdn_file.shape[2]
+        num_full_batches, num_remaining_cols = np.divmod(self.num_samples, self.group_size)
+        num_total_columns = self.num_samples
+        if num_remaining_cols != 0:
+            num_total_columns += (self.group_size - num_remaining_cols)
+        self.column_idx = np.arange(num_total_columns)
+        self.column_idx = self.column_idx.reshape((-1, self.group_size))
+        if num_remaining_cols != 0:
+            self.column_idx[-1, :] -= (self.group_size - num_remaining_cols)
+        if not (self.column_idx.shape[0] == (num_full_batches if num_remaining_cols == 0 else num_full_batches + 1)):
+            raise RuntimeError('The column grouping has resulted in an unexpected size. Please report to developers.')
+
+    def __len__(self):
+        """Provides the number of image partitions that exist."""
+        return self.column_idx.shape[0]
+
+    def __getitem__(self, item):
+        load_time = time.time()
+        # Extract which columns are included in this image partition
+        col_idx = self.column_idx[item, :]
+        # Find locations within the GLT file that contain those columns -- Columns (Sample) are stored in first dim.
+        # Column + 1 because GLT is 1-based indexing
+        glt_idx = np.any(np.equal(np.absolute(self.glt_file[:, :, (0,)]), col_idx[None, None, :] + 1), axis=2)
+        # Read those locations from the datafile on disk through the memmapped file
+        data = np.asarray(self.rdn_file[glt_idx, :])
+        # Filter out the bands that are not used (due to water vapor absorption)
+        data = data[:, self.band_keep_mask]
+        # Censor detection is more difficult because the image is flattened.
+        # We can unflatten it with the corresponding sample values from the GLT, accounting for 1-based indexing:
+        reconstructed_raw = NODATA * np.ones((self.num_lines, col_idx.shape[0], data.shape[1]))
+        reconstructed_raw[np.absolute(self.glt_file[glt_idx, 1]) - 1,
+                          np.absolute(self.glt_file[glt_idx, 0]) - col_idx[0] - 1,
+                          :] = data
+        # Censor detection accounts for empty (-9999/NoData) pixels
+        censor_mask = get_censor_mask(reconstructed_raw)
+        # Store how long this process took
+        load_time = time.time() - load_time
+        # Convert censor_mask to integer type (PyTorch does not support bool)
+        censor_mask = censor_mask.astype(np.uint8)
+        glt_idx = glt_idx.astype(np.uint8)
+        # Return data and where it is from in the image to main thread
+        return data, censor_mask, glt_idx, load_time
+
+
 class QuietPrinter(object):
     def __init__(self, quiet):
         self.quiet = quiet
@@ -284,7 +344,7 @@ if __name__ == '__main__':
                                                  '     L 1 sparsity\n'
                                                  '       C ode\n\n'
                                                  'University of Utah Albedo-Corrected Reweighted-L1 Matched Filter',
-                                     epilog='When using this software for academic purposes, please cite: \n' +
+                                     epilog='When using this software, please cite: \n' +
                                             ' Foote et al. 2019, "Title Here" doi:xxxx.xxxx\n',
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('rdn', type=str, metavar='RADIANCE_FILE',
@@ -328,13 +388,15 @@ if __name__ == '__main__':
     parser.add_argument('--onlypositiveradiance', action='store_true',
                         help='Only process pixels that have strictly non-negative radiance for all wavelengths. ' +
                              'This flag overrides any batch size setting to 1.')
-    parser.add_argument('--geo', type=str, metavar='GLT',
+    parser.add_argument('--outputgeo', type=str, metavar='GLT',
                         help='Use the provided GLT file to perform geocorrection to the resulting ENVI file. This ' +
                              'result will have the same name as the provided output file but ending with \'_geo\'.')
+    parser.add_argument('--geo', type=str, metavar='GLT', dest='rdnfromgeo',
+                        help='If using an orthocorrected radiance file, provide the corresponding GLT file.')
     parser.add_argument('-q', '--quiet', action='store_true',
                         help='Do not write status updates to console.')
     parser.add_argument('--version', action='version',
-                        version='%(prog)s v1.0\n University of Utah Albedo-Corrected Reweighted-L1 ' +
+                        version='%(prog)s v1.1\n University of Utah Albedo-Corrected Reweighted-L1 ' +
                                 'Matched Filter.\n See Foote et al. 2019 DOI: XXXx.xxxx for details.')
     args = parser.parse_args()
     start = time.time()
@@ -344,6 +406,9 @@ if __name__ == '__main__':
     if args.onlypositiveradiance and args.batch is not 1:
         args.batch = 1
         qprint('Forced batch size to be 1 for positive radiance filtering.')
+    if args.rdnfromgeo and args.batch is not 1:
+        args.batch = 1
+        qprint('Forced batch size to be 1 to use geocorrected source radiance.')
     # Determine compute device to use based on availability and user request
     device = torch.device('cuda') if args.gpu and torch.cuda.is_available() else torch.device('cpu')
     device_name = 'cpu' if device == torch.device('cpu') else torch.cuda.get_device_name(device)
@@ -376,12 +441,12 @@ if __name__ == '__main__':
         qprint('Warning: Provided target spectrum does not have the same number of bands as data! Trying zero pad...')
         padded_spec = np.zeros((wavelengths.shape[0], 2))
         padded_spec[:, 0] = wavelengths
-        if np.max(wavelengths) < np.max(target[:, 0]) or np.min(wavelengths) > np.min(target[:, 0]):
-            raise RuntimeError('Provided target spectrum has values for wavelengths outside of the '
-                               'range of wavelengths in the data.')
-        qprint(' Matching wavelengths from provided target that are within 1 nm of the data wavelengths...')
+        #if np.max(wavelengths) < np.max(target[:, 0]) or np.min(wavelengths) > np.min(target[:, 0]):
+        #    raise RuntimeError('Provided target spectrum has values for wavelengths outside of the '
+        #                       'range of wavelengths in the data.')
+        qprint(' Using wavelengths from provided target that are within 0.1 nm of the data wavelengths...')
         for wave in target:
-            padded_spec[np.absolute(padded_spec[:, 0] - wave[0]) < 1, :] = wave
+            padded_spec[np.absolute(padded_spec[:, 0] - wave[0]) < 0.1, :] = wave
         qprint(' Zero padding provided spectrum complete.')
         target = padded_spec
     if not np.allclose(wavelengths, target[:, 0]):
@@ -396,10 +461,24 @@ if __name__ == '__main__':
     band_keep = get_mask_bad_bands(wavelengths)
 
     # Create an iterable dataset that loads the data as we need it
-    dataset = torch.utils.data.DataLoader(GroupedRadianceMemmappedFileDataset(rdn_file_memmap, band_keep, args.group),
-                                          num_workers=args.threads,
-                                          batch_size=args.batch,
-                                          pin_memory=device is not torch.device('cpu'))
+    if args.rdnfromgeo:
+        # Open GLT file for source radiance lookups.
+        src_glt_file = spectral.io.envi.open(args.rdnfromgeo + '.hdr')
+        src_glt_file_memmap = src_glt_file.open_memmap(interleave='bip', writable=False)
+        dataset = torch.utils.data.DataLoader(GeocorrectedGroupedRadianceMemmappedFileDataset(rdn_file_memmap,
+                                                                                              band_keep,
+                                                                                              args.group,
+                                                                                              src_glt_file_memmap),
+                                              num_workers=args.threads,
+                                              batch_size=args.batch,  # Should be 1
+                                              pin_memory=device is not torch.device('cpu'))
+    else:
+        dataset = torch.utils.data.DataLoader(GroupedRadianceMemmappedFileDataset(rdn_file_memmap,
+                                                                                  band_keep,
+                                                                                  args.group),
+                                              num_workers=args.threads,
+                                              batch_size=args.batch,
+                                              pin_memory=device is not torch.device('cpu'))
 
     # Create an image file for the output
     output_metadata = {'description': 'University of Utah Albedo-Corrected Reweighted-L1 Matched Filter Result. ' +
@@ -421,6 +500,8 @@ if __name__ == '__main__':
                                              f'albedocorrection: {not args.noalbedo},' +
                                              f'target spectrum: {args.spec},' +
                                              f'compute: {device_name}, batch: {args.batch}' '}'}
+    if args.rdnfromgeo:
+        output_metadata.update({'map info': rdn_file.metadata['map info']})
     output_filename = f'{args.out}.hdr'
     output_file = spectral.io.envi.create_image(output_filename, output_metadata, force=args.overwrite, ext='')
     output_memmap = output_file.open_memmap(interleave='bip', writable=True)
@@ -447,8 +528,9 @@ if __name__ == '__main__':
         # Move data to desired compute device, and cast to appropriate data type for processing
         rdn_data = rdn_data.to(device=device, dtype=dtype)
 
-        # Flatten data into long columns, preserving (0th) batch dimension and (3rd) spectral dimension
-        rdn_data = rdn_data.reshape((rdn_data.shape[0], rdn_data.shape[1] * rdn_data.shape[2], rdn_data.shape[3]))
+        # Flatten data into long columns, preserving first (0th) batch dimension and last (-1st) spectral dimension
+        # No-op if the rdn data is already spatially flattened
+        rdn_data = rdn_data.reshape((rdn_data.shape[0], np.prod(rdn_data.shape[1:-1]), rdn_data.shape[-1]))
 
         if args.onlypositiveradiance:  # Batch size is 1, so the first dimension can be eliminated within if statement
             # Identify pixels that have all positive radiance values, filter will only be applied on these pixels
@@ -472,17 +554,25 @@ if __name__ == '__main__':
         mf_out = mf_out.to(device=torch.device('cpu'))
         albedo_out = albedo_out.to(device=torch.device('cpu'))
 
-        # Un-flatten the multiple columns back to their original places and write to disk
-        censor_mask_bool = censor_mask.cpu().numpy() == 0
-        for i in range(args.batch):
-            temp_out_reshape = NODATA * np.ones((censor_mask_bool.shape[1], col_idx.shape[1])).flatten()
-            temp_out_reshape[np.repeat(censor_mask_bool[i], args.group)] = mf_out[i, :, 0].numpy()
-            temp_out_reshape = temp_out_reshape.reshape(censor_mask_bool.shape[1], col_idx.shape[1])
-            output_memmap[:, col_idx[i], 3] = temp_out_reshape.squeeze()
-            temp_albedo_reshape = NODATA * np.ones((censor_mask_bool.shape[1], col_idx.shape[1])).flatten()
-            temp_albedo_reshape[np.repeat(censor_mask_bool[i], args.group)] = albedo_out[i, :, 0].numpy()
-            temp_albedo_reshape = temp_albedo_reshape.reshape(censor_mask_bool.shape[1], col_idx.shape[1])
-            output_memmap[:, col_idx[i], 4] = temp_albedo_reshape.squeeze()
+        if args.rdnfromgeo:  # Modify how the data gets written back
+            # col_idx is actually glt_idx, which is a boolean mask array stored as torch.uint8
+            glt_idx = col_idx.cpu().numpy()[0, ...] == 1
+            # Data just has to be written back to where it came from, marked by glt_idx, flat order is preserved
+            output_memmap[glt_idx, 3] = mf_out[0, :, 0]
+            output_memmap[glt_idx, 4] = albedo_out[0, :, 0]
+
+        else:
+            # Un-flatten the multiple columns back to their original places and write to disk
+            censor_mask_bool = censor_mask.cpu().numpy() == 0
+            for i in range(args.batch):
+                temp_out_reshape = NODATA * np.ones((censor_mask_bool.shape[1], col_idx.shape[1])).flatten()
+                temp_out_reshape[np.repeat(censor_mask_bool[i], args.group)] = mf_out[i, :, 0].numpy()
+                temp_out_reshape = temp_out_reshape.reshape(censor_mask_bool.shape[1], col_idx.shape[1])
+                output_memmap[:, col_idx[i], 3] = temp_out_reshape.squeeze()
+                temp_albedo_reshape = NODATA * np.ones((censor_mask_bool.shape[1], col_idx.shape[1])).flatten()
+                temp_albedo_reshape[np.repeat(censor_mask_bool[i], args.group)] = albedo_out[i, :, 0].numpy()
+                temp_albedo_reshape = temp_albedo_reshape.reshape(censor_mask_bool.shape[1], col_idx.shape[1])
+                output_memmap[:, col_idx[i], 4] = temp_albedo_reshape.squeeze()
 
         if args.asap:
             output_memmap.flush()
@@ -492,11 +582,11 @@ if __name__ == '__main__':
     qprint(f'\nFilter processing completed in {run_time} seconds.')
 
     # Do geocorrection based on the provided GLT file, if provided.
-    if args.geo is not None:
-        qprint(f'Beginning geocorrection with {args.geo}')
+    if args.outputgeo is not None:
+        qprint(f'Beginning geocorrection with {args.outputgeo}')
 
         # Open the GLT file
-        glt_file = spectral.io.envi.open(args.geo + '.hdr')
+        glt_file = spectral.io.envi.open(args.outputgeo + '.hdr')
         glt_memmap = glt_file.open_memmap(interleave='bip', writable=False)
 
         # Create an output file for the georeferenced data. Metadata based on filter output and GLT file essentials.
