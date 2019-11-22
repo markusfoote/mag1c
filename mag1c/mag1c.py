@@ -40,12 +40,14 @@
 
 import torch
 import numpy as np
+import os
 import time
 import copy
 import argparse
 import spectral
 import torch.utils.data
-from typing import Tuple
+from skimage import morphology, measure
+from typing import Tuple, Optional, Union, List
 
 RGB = [640, 550, 460]
 NODATA = -9999
@@ -80,7 +82,7 @@ def acrwl1mf(x: torch.Tensor,
     device = x.device
     N = x.shape[1]  # number of samples
     regularizer = torch.zeros(x.shape[0], x.shape[1], 1, dtype=dtype, device=device)
-    modx = torch.zeros_like(x, dtype=dtype, device=device)
+    modx = torch.zeros_like(x, dtype=dtype, device=device, layout=torch.strided)
     template = template.unsqueeze(0).unsqueeze(0)
     scaling = torch.tensor(1e5, dtype=dtype, device=device)
     epsilon = torch.tensor(1e-9, dtype=dtype, device=device)
@@ -107,11 +109,11 @@ def acrwl1mf(x: torch.Tensor,
         # Calculate new regularizer weights
         regularizer = torch.reciprocal(torch.mul(R, mf + epsilon), out=regularizer)
         # Re-calculate statistics
-        modx = torch.add(x, -1, R * mf * target, out=modx)
+        modx = torch.add(x, alpha=-1, other=R * mf * target, out=modx)
         mu = torch.mean(modx, 1, keepdim=True, out=mu)
         target = torch.mul(template, mu, out=target)
-        xmean = torch.add(modx, -1, mu, out=xmean)
-        C = torch.div(torch.bmm(torch.transpose(xmean, 1, 2), xmean), N, out=C)
+        xmean = torch.add(modx, alpha=-1, other=mu, out=xmean)
+        C = torch.div(torch.bmm(torch.transpose(xmean, 1, 2), xmean), other=torch.tensor(N), out=C)
         Cit = torch.cholesky_solve(torch.transpose(target, 1, 2), torch.cholesky(C, upper=False), upper=False)
         # Compute matched filter with regularization
         normalizer = torch.bmm(target, Cit, out=normalizer)
@@ -125,10 +127,11 @@ def acrwl1mf(x: torch.Tensor,
 
 
 def get_censor_mask(x: np.ndarray) -> np.ndarray:
-    """Determines the regions of the image that are censored.
+    """Determines the regions of the image that are censored. This assumes that an
+    entire 'bar'/sample-direction (in un-geocorrected data) is censored together.
 
     :param x: Radiance image data to analyze for censored regions.
-    :return: Boolean 1D ndarray with True where censoring is detected.
+    :return: Boolean 1D ndarray (corresponding to column/flight direction) with True where censoring is detected.
     """
     is_censored = np.diff(x, axis=0) == 0
     is_censored = np.all(is_censored, axis=(1, 2))
@@ -140,6 +143,81 @@ def get_censor_mask(x: np.ndarray) -> np.ndarray:
     is_censored = np.logical_or(is_censored, np.any(x == NODATA, axis=(1, 2)))  # TODO might want to split this out
     return is_censored
 
+
+def get_saturation_mask(data: np.ndarray, wave: np.ndarray,
+                        threshold: Optional[float] = None,
+                        waverange: Optional[Tuple[float, float]] = None) -> np.ndarray:
+    """Calculates a mask of pixels that appear saturated (in the SWIR, by default).
+    Pixels containing ANY radiance value above the provided threshold (default 2.0) within
+    the wavelength window provided (default 1945 - 2485 nm).
+
+    :param data: Radiance image to screen for sensor saturation.
+    :param wave: vector of wavelengths (in nanometers) that correspond to the bands (last dimension) in the data.
+    Caution: No input validation is performed, so this vector MUST be the same length as the data's last dimension.
+    :param threshold: radiance value that defines the edge of saturation.
+    :param waverange: wavelength range, defined as a tuple (low, high), to screen within for saturation.
+    :return: Binary Mask with 1/True where saturation occurs, 0/False for normal pixels
+    """
+    if threshold is None:
+        threshold = 2.0
+    if waverange is None:
+        waverange = (1945, 2485)
+    is_saturated = (data[..., np.logical_and(wave >= waverange[0], wave <= waverange[1])] > threshold).any(axis=-1)
+    return is_saturated
+
+
+def calculate_hfdi(data: Union[np.ndarray, torch.Tensor],
+                   wave: Union[np.ndarray, torch.Tensor]) -> Union[np.ndarray, torch.Tensor]:
+    """Calculates the Hyperspectral Fire Detection Index.
+
+    :param data: Radiance Image.
+    :param wave: vector of wavelengths (in nanometers) that correspond to the bands (last dimension) in the data.
+    Caution: No input validation is performed, so this vector MUST be the same length as the data's last dimension.
+    :return: HFDI index.
+    """
+    BANDS = (2430, 2060)
+    band_idx = np.argmin(np.absolute(wave - np.asarray((BANDS,)).T), axis=1)
+    hfdi = (data[..., band_idx[0]] - data[..., band_idx[1]]) / (data[..., band_idx[0]] + data[..., band_idx[1]])
+    return hfdi
+
+
+def generate_template_from_bands(centers:Union[np.ndarray, List], fwhm:Union[np.ndarray, List]) -> np.ndarray:
+    """Calculate a unit absorption spectrum for methane by convolving with given band information.
+
+    :param centers: wavelength values for the band centers, provided in nanometers.
+    :param fwhm: full width half maximum for the gaussian kernel of each band.
+    :return template: the unit absorption spectum
+    """
+    # import scipy.stats
+    SCALING = 1e5
+    centers = np.asarray(centers)
+    fwhm = np.asarray(fwhm)
+    if np.any(~np.isfinite(centers)) or np.any(~np.isfinite(fwhm)):
+        raise RuntimeError('Band Wavelengths Centers/FWHM data contains non-finite data (NaN or Inf).')
+    if centers.shape[0] != fwhm.shape[0]:
+        raise RuntimeError('Length of band center wavelengths and band fwhm arrays must be equal.')
+    lib = spectral.io.envi.open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'z30sa0200ga00wv2.hdr'),
+                                os.path.join(os.path.dirname(os.path.abspath(__file__)), 'z30sa0200ga00wv2.lut'))
+    rads = np.asarray(lib.asarray()).squeeze()
+    wave = np.asarray(lib.bands.centers)
+    concentrations = np.asarray([0, 500, 1000, 2000, 4000, 8000, 16000])
+    # sigma = fwhm / ( 2 * sqrt( 2 * ln(2) ) )  ~=  fwhm / 2.355
+    sigma = fwhm / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+    # response = scipy.stats.norm.pdf(wave[:, None], loc=centers[None, :], scale=sigma[None, :])
+    # Evaluate normal distribution explicitly
+    var = sigma ** 2
+    denom = (2 * np.pi * var) ** 0.5
+    numer = np.exp(-(wave[:, None] - centers[None, :])**2 / (2*var))
+    response = numer / denom
+    # Normalize each gaussian response to sum to 1.
+    response = np.divide(response, response.sum(axis=0), where=response.sum(axis=0) > 0, out=response)
+    # implement resampling as matrix multiply
+    resampled = rads.dot(response)
+    lograd = np.log(resampled, out=np.zeros_like(resampled), where=resampled > 0)
+    slope, _, _, _ = np.linalg.lstsq(np.stack((np.ones_like(concentrations), concentrations)).T, lograd, rcond=None)
+    spectrum = slope[1, :] * SCALING
+    target = np.stack((centers, spectrum)).T  # np.stack((np.arange(spectrum.shape[0]), centers, spectrum)).T
+    return target
 
 def read_template_from_txt(txt_file: str) -> np.ndarray:
     """Reads a template spectrum stored in a .txt file, stripping band numbers from the first column.
@@ -167,6 +245,10 @@ def read_template_from_mat(mat_file: str) -> np.ndarray:
 
 def get_mask_bad_bands(wave: np.ndarray) -> np.ndarray:
     """Calculates a mask of the wavelengths to keep based on water vapor absorption features.
+    Rejects wavelengths: - Below 400 nm
+                         - Above 2485 nm
+                         - Between 1350-1420 nm (water absorption region)
+                         - Between 1800-1945 nm (water absorption region)
 
     :param wave: Vector of wavelengths to evaluate.
     :return:
@@ -212,11 +294,30 @@ def apply_glt(glt, raster, background_value=NODATA, out=None):
     return out
 
 
+def get_radius_in_pixels(value_str, metadata):
+    if value_str.endswith('px'):
+        return np.ceil(float(value_str.split('px')[0]))
+    if value_str.endswith('m'):
+        if 'map info' not in metadata:
+            raise RuntimeError('Image does not have resolution specified. Try giving values in pixels.')
+        if 'meters' not in metadata['map info'][10].lower():
+            raise RuntimeError('Unknown unit for image resolution.')
+        meters_per_pixel_x = float(metadata['map info'][5])
+        meters_per_pixel_y = float(metadata['map info'][6])
+        if meters_per_pixel_x != meters_per_pixel_y:
+            qprint('Warning: x and y resolutions are not equal, the average resolution will be used.')
+            meters_per_pixel_x = (meters_per_pixel_y + meters_per_pixel_x) / 2.0
+        pixel_radius = float(value_str.split('m')[0]) / meters_per_pixel_x
+        return np.ceil(pixel_radius)
+    raise RuntimeError('Unknown unit specified.')
+
+
 class GroupedRadianceMemmappedFileDataset(torch.utils.data.Dataset):
     def __init__(self,
                  rdn_memmap_file: np.core.memmap,
                  band_keep: np.ndarray,
-                 group_size: int) -> None:
+                 group_size: int,
+                 sat_mask_full: np.ndarray) -> None:
         """Initializes with the memory-mapped file and information for how it should be read.
 
         :param rdn_memmap_file: Memory-mapped file to read
@@ -226,6 +327,7 @@ class GroupedRadianceMemmappedFileDataset(torch.utils.data.Dataset):
         self.rdn_file = rdn_memmap_file
         self.band_keep_mask = band_keep
         self.group_size = group_size
+        self.sat_mask_full = sat_mask_full
         # Determine how many partitions there will be from the group size request
         self.num_lines, self.num_samples, self.num_bands = self.rdn_file.shape
         num_full_batches, num_remaining_cols = np.divmod(self.num_samples, self.group_size)
@@ -260,24 +362,29 @@ class GroupedRadianceMemmappedFileDataset(torch.utils.data.Dataset):
         # Compute the region (if any) that was censored and remove it from the data to be passed on
         censor_mask = get_censor_mask(data)
         data = data[~censor_mask, :, :]
+        # lookup indexes in saturation mask
+        sat_mask = None if self.sat_mask_full is None else self.sat_mask_full[:, col_idx][~censor_mask, ...]
         # Store how long this process took
         load_time = time.time() - load_time
         # Convert censor_mask to integer type (PyTorch does not support bool)
         censor_mask = censor_mask.astype(np.uint8)
         # Return data and where it is from in the image to main thread
+        if sat_mask is not None:
+            return data, censor_mask, col_idx, load_time, sat_mask
         return data, censor_mask, col_idx, load_time
-
 
 class GeocorrectedGroupedRadianceMemmappedFileDataset(torch.utils.data.Dataset):
     def __init__(self,
                  rdn_memmap_file: np.core.memmap,
                  band_keep: np.ndarray,
                  group_size: int,
-                 src_glt_memmap_file: np.core.memmap) -> None:
+                 src_glt_memmap_file: np.core.memmap,
+                 sat_mask_full: np.ndarray) -> None:
         self.rdn_file = rdn_memmap_file
         self.band_keep_mask = band_keep
         self.group_size = group_size
         self.glt_file = src_glt_memmap_file
+        self.sat_mask_full = sat_mask_full
         # Determine number of partitions from the group size request and size of original rdn represented in glt
         abs_glt = np.absolute(self.glt_file)
         nonzero_glt_lines = abs_glt[abs_glt[:, :, 1] > 0, 1]
@@ -318,15 +425,18 @@ class GeocorrectedGroupedRadianceMemmappedFileDataset(torch.utils.data.Dataset):
                           np.absolute(self.glt_file[glt_idx, 0]) - col_idx[0] - 1,
                           :] = data
         # Censor detection accounts for empty (-9999/NoData) pixels
-        censor_mask = get_censor_mask(reconstructed_raw)
+        censor_mask = get_censor_mask(reconstructed_raw)  # TODO shouldn't this be filtering the data with censor_mask?
+        # Lookup saturation mask values
+        sat_mask = None if self.sat_mask_full is None else self.sat_mask_full[glt_idx]
         # Store how long this process took
         load_time = time.time() - load_time
         # Convert censor_mask to integer type (PyTorch does not support bool)
         censor_mask = censor_mask.astype(np.uint8)
         glt_idx = glt_idx.astype(np.uint8)
         # Return data and where it is from in the image to main thread
+        if sat_mask is not None:
+            return data, censor_mask, glt_idx, load_time, sat_mask
         return data, censor_mask, glt_idx, load_time
-
 
 class QuietPrinter(object):
     def __init__(self, quiet):
@@ -337,7 +447,7 @@ class QuietPrinter(object):
             print(*args, **kwargs)
 
 
-if __name__ == '__main__':
+def main():
     parser = argparse.ArgumentParser(description='       M atched filter with\n'
                                                  '       A lbedo correction and\n'
                                                  ' rewei G hted\n'
@@ -346,12 +456,13 @@ if __name__ == '__main__':
                                                  'University of Utah Albedo-Corrected Reweighted-L1 Matched Filter',
                                      epilog='When using this software, please cite: \n' +
                                             ' Foote et al. 2019, "Title Here" doi:xxxx.xxxx\n',
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('rdn', type=str, metavar='RADIANCE_FILE',
-                        help='ENVI format radiance file to process. Provide the data file itself, not the header.')
-    parser.add_argument('spec', type=str, metavar='TARGET_SPEC_FILE',
-                        help='Target spectrum file to use.')
-    parser.add_argument('out', type=str, metavar='OUTPUT_FILE',
+                                     formatter_class=argparse.RawDescriptionHelpFormatter,
+                                     add_help=False)
+    parser.add_argument('--spec', type=str, metavar='TARGET_SPEC_FILE',
+                        help='Target spectrum file to use. If no file is specified, a target spectrum will be '
+                             'calculated from an internal methane absorption spectrum that is convolved to the band '
+                             'centers and FWHMs stored in the radiance image header.')
+    parser.add_argument('--out', type=str, metavar='OUTPUT_FILE',
                         help='File to write output into. Provide the data file itself, not the header.')
     parser.add_argument('--gpu', action='store_true',
                         help='Use GPU for accelerated computation. (default: %(default)s)')
@@ -392,13 +503,47 @@ if __name__ == '__main__':
                         help='Use the provided GLT file to perform geocorrection to the resulting ENVI file. This ' +
                              'result will have the same name as the provided output file but ending with \'_geo\'.')
     parser.add_argument('--geo', type=str, metavar='GLT', dest='rdnfromgeo',
-                        help='If using an orthocorrected radiance file, provide the corresponding GLT file.')
+                        help='If using an orthocorrected radiance file, provide the corresponding GLT file. '
+                             'The output will also be geocorrected -- Do not use with --outputgeo to apply glt.')
+    parser.add_argument('--optimize', action='store_true', help='Use Pytorch torchscript optimizations. Experimental.')
     parser.add_argument('-q', '--quiet', action='store_true',
                         help='Do not write status updates to console.')
     parser.add_argument('--version', action='version',
-                        version='%(prog)s v1.1\n University of Utah Albedo-Corrected Reweighted-L1 ' +
+                        version='%(prog)s v1.1.1.dev7\n University of Utah Albedo-Corrected Reweighted-L1 ' +
                                 'Matched Filter.\n See Foote et al. 2019 DOI: XXXx.xxxx for details.')
-    args = parser.parse_args()
+    parser.add_argument('-T', '--saturationthreshold', type=float, metavar='THRESHOLD',
+                        help='specify the threshold used for classifying pixels as saturated (default: 2.0)')
+    parser.add_argument('-W', '--saturationwindow', type=float, nargs=2, metavar=('LOW', 'HIGH'),
+                        help='specify the wavelength window, as "-W LOW HIGH", within which to detect saturation '
+                             '(default: 1945, 2485 nanometers)')
+    parser.add_argument('-M', '--maskgrowradius', type=str, metavar='RADIUS', nargs='?', const='100m', default=None,
+                        help='radius to use for expanding the saturation mask to cover (and exclude) flare-related '
+                             'anomalies. This value must include units: meters (abbreviated as m) or pixels '
+                             '(abbreviated as px). If flag is given without a value, 100m will be used.')
+    parser.add_argument('-A', '--mingrowarea', type=int, metavar='AREA', nargs='?', const=6, default=None,
+                        help='minimum number of pixels that must constitute a 2-connected saturation region for it to '
+                             'be grown by the mask-grow-radius value. If flag is provided without a value, 6 pixels '
+                             'will be assumed as the value.')
+    parser.add_argument('--hfdi', action='store_true',
+                        help='calculate the Hyperspectral Fire Detection Index (doi: 10.1016/j.rse.2009.03.010) '
+                             'and append band to output.')
+    parser.add_argument('--saturation-processing-block-length', type=int, metavar='N', default=500)
+    # The saturation argument is required only if the saturation threshold or window has been specified.
+    # Save all (potentially) required arguments until after this initial parse so that we can pass without errors.
+    args, rem_args = parser.parse_known_args()
+    parser.add_argument('-S', '--saturation', action='store_true', required=(args.saturationthreshold is not None or
+                                                                             args.saturationwindow is not None or
+                                                                             args.maskgrowradius is not None or
+                                                                             args.mingrowarea is not None),
+                        help='enable saturation detection (and avoid processing such pixels). This flag overrides '
+                             'any batch size setting to 1. Required if any saturation related flags are provided. '
+                             '(default: %(default)s)')
+    parser.add_argument('rdn', type=str, metavar='RADIANCE_FILE',
+                        help='ENVI format radiance file to process -- Provide the data file itself, not the header')
+    # Add the help option back, because we had to remove it from initial parsing so that all options are present.
+    parser.add_argument('-h', '--help', action='help', help='show this help message and exit')
+    # Finally, parse all the (remaining) arguments, this will catch the --help option, and fail on required arguments
+    args = parser.parse_args(rem_args, namespace=args)
     start = time.time()
 
     qprint = QuietPrinter(args.quiet)
@@ -406,9 +551,16 @@ if __name__ == '__main__':
     if args.onlypositiveradiance and args.batch is not 1:
         args.batch = 1
         qprint('Forced batch size to be 1 for positive radiance filtering.')
+    if args.saturation and args.batch is not 1:
+        args.batch = 1
+        qprint('Forced batch size to be 1 for saturation detection.')
     if args.rdnfromgeo and args.batch is not 1:
         args.batch = 1
         qprint('Forced batch size to be 1 to use geocorrected source radiance.')
+    if args.rdnfromgeo is not None and args.outputgeo is not None:
+        args.outputgeo = None
+        qprint('Overriding attempt to geocorrect output with GLT: output will already be '
+               'geocorrected because the input is geocorrected.')
     # Determine compute device to use based on availability and user request
     device = torch.device('cuda') if args.gpu and torch.cuda.is_available() else torch.device('cpu')
     device_name = 'cpu' if device == torch.device('cpu') else torch.cuda.get_device_name(device)
@@ -419,39 +571,45 @@ if __name__ == '__main__':
     qprint(f'Computing with precision {"float64" if dtype == torch.float64 else "float32"}.' +
            f' Output will be written as {"float32" if output_dtype == np.float32 else "float64"}.')
 
-    # Load the target spectrum file that was provided by the user
-    qprint(f'Loading target spectrum from {args.spec}')
-    if args.spec.endswith('.txt'):
-        target = read_template_from_txt(args.spec)
-    elif args.spec.endswith('.mat'):
-        target = read_template_from_mat(args.spec)
-    else:
-        raise RuntimeError('Invalid target file, expected file types are .txt or .mat.')
-    qprint('Target spectrum loaded successfully.')
-
     # Open the specified radiance file as a memory-mapped object
     qprint('Opening radiance data file.')
     rdn_file = spectral.io.envi.open(args.rdn + '.hdr')
     rdn_file_memmap = rdn_file.open_memmap(interleave='bip', writable=False)
 
-    # Load the wavelengths from the source radiance file and check they match the target, otherwise fail
+    if args.spec is None:  # Convolve internal methane spectrum for header bands/fwhm.
+        if str(rdn_file.bands.band_unit).lower() in ['nanometers', 'nanometer', 'nm']:
+            target = generate_template_from_bands(centers=rdn_file.bands.centers, fwhm=rdn_file.bands.bandwidths)
+        else:
+            raise RuntimeError(f'Unknown band wavelength unit: {rdn_file.bands.band_unit}')
+        qprint('Target spectrum generated successfully.')
+    else:  # Load the target spectrum file that was provided by the user
+        qprint(f'Loading target spectrum from {args.spec}')
+        if args.spec.endswith('.txt'):
+            target = read_template_from_txt(args.spec)
+        elif args.spec.endswith('.mat'):
+            target = read_template_from_mat(args.spec)
+        else:
+            raise RuntimeError('Invalid target file, expected file types are .txt or .mat.')
+        qprint('Target spectrum loaded successfully.')
+
+    # Check target spectrum wavelengths match the target, otherwise fail (mainly for loaded spectrum files)
     qprint('Checking that the provided target is compatible with the data file wavelengths...')
     wavelengths = np.array(rdn_file.bands.centers)  # np.asarray(rdn_file.metadata['wavelength']).astype(float).T
     if wavelengths.shape[0] != target.shape[0]:
         qprint('Warning: Provided target spectrum does not have the same number of bands as data! Trying zero pad...')
         padded_spec = np.zeros((wavelengths.shape[0], 2))
         padded_spec[:, 0] = wavelengths
-        #if np.max(wavelengths) < np.max(target[:, 0]) or np.min(wavelengths) > np.min(target[:, 0]):
+        # if np.max(wavelengths) < np.max(target[:, 0]) or np.min(wavelengths) > np.min(target[:, 0]):
         #    raise RuntimeError('Provided target spectrum has values for wavelengths outside of the '
         #                       'range of wavelengths in the data.')
-        qprint(' Using wavelengths from provided target that are within 0.1 nm of the data wavelengths...')
+        qprint(' Using wavelengths from provided target that are within 0.2 nm of the data wavelengths...')
         for wave in target:
-            padded_spec[np.absolute(padded_spec[:, 0] - wave[0]) < 0.1, :] = wave
+            padded_spec[np.absolute(padded_spec[:, 0] - wave[0]) < 0.2, :] = wave
         qprint(' Zero padding provided spectrum complete.')
         target = padded_spec
-    if not np.allclose(wavelengths, target[:, 0]):
+    if not np.allclose(wavelengths, target[:, 0], atol=0.2):
         raise RuntimeError('Target spectrum has different wavelengths than radiance file.')
-    qprint('Target spectrum checks complete! Proceeding with filtering.')
+    qprint('Target spectrum checks complete.')
 
     # Determine the index and wavelengths of the RGB data that will be included in the output
     rgb_idx = get_rbg_band_indexes(wavelengths)
@@ -459,8 +617,41 @@ if __name__ == '__main__':
 
     # Determine mask of what wavelengths will be used in processing
     band_keep = get_mask_bad_bands(wavelengths)
+    wave_keep = wavelengths[band_keep]
 
-    # Create an iterable dataset that loads the data as we need it
+    # If thresholding is enabled, calculate the mask and preprocess with dilation
+    sat_mask_full = None
+    if args.saturation:
+        qprint('Detecting saturated pixels...', end='')
+        if args.maskgrowradius is not None:
+            grow_radius_px = get_radius_in_pixels(args.maskgrowradius, rdn_file.metadata)
+            selem = morphology.disk(radius=grow_radius_px, dtype=np.bool)
+        sat_mask_full = np.zeros((rdn_file.nrows, rdn_file.ncols), dtype=np.uint8)
+        block_overlap = np.ceil((args.mingrowarea if args.mingrowarea is not None else 0) + (grow_radius_px if args.maskgrowradius is not None else 0)).astype(np.int64)
+        block_step = args.saturation_processing_block_length
+        block_length = block_step + block_overlap
+        line_idx_start_values = np.arange(start=0, stop=rdn_file.nrows, step=block_step)
+        for line_block_start in line_idx_start_values:
+            line_block_end = np.minimum(rdn_file.nrows, line_block_start + block_length)
+            block_data = rdn_file.read_subregion((line_block_start, line_block_end), (0, rdn_file.ncols))
+            sat_mask_block = get_saturation_mask(block_data[:, :, band_keep], wave_keep)
+            if args.maskgrowradius is not None:
+                sat_mask_grow_regions = np.zeros_like(sat_mask_block, dtype=np.uint8)
+                for region in measure.regionprops(measure.label(sat_mask_block.astype(np.uint8), connectivity=2)):
+                    if region.area >= args.mingrowarea:
+                        # Mark these large regions in the mask to get dilated
+                        for c in region.coords:
+                            sat_mask_grow_regions[c[0], c[1]] = 1
+                sat_mask_large_grown = morphology.binary_dilation(image=sat_mask_grow_regions.astype(np.bool),
+                                                                  selem=selem)
+                sat_mask_out = sat_mask_large_grown.astype(np.uint8)
+                sat_mask_out[sat_mask_block] = np.asarray(2, dtype=np.uint8)
+                sat_mask_block = sat_mask_out
+            sat_mask_full[line_block_start:line_block_end, ...][sat_mask_block == 1] = 1
+            sat_mask_full[line_block_start:line_block_end, ...][sat_mask_block == 2] = 2
+        qprint(' Done.')
+
+    # Create an iterable dataset that loads the data into memory as we need it
     if args.rdnfromgeo:
         # Open GLT file for source radiance lookups.
         src_glt_file = spectral.io.envi.open(args.rdnfromgeo + '.hdr')
@@ -468,14 +659,16 @@ if __name__ == '__main__':
         dataset = torch.utils.data.DataLoader(GeocorrectedGroupedRadianceMemmappedFileDataset(rdn_file_memmap,
                                                                                               band_keep,
                                                                                               args.group,
-                                                                                              src_glt_file_memmap),
+                                                                                              src_glt_file_memmap,
+                                                                                              sat_mask_full),
                                               num_workers=args.threads,
-                                              batch_size=args.batch,  # Should be 1
+                                              batch_size=args.batch,  # Should be 1 -- MUST be 1
                                               pin_memory=device is not torch.device('cpu'))
     else:
         dataset = torch.utils.data.DataLoader(GroupedRadianceMemmappedFileDataset(rdn_file_memmap,
                                                                                   band_keep,
-                                                                                  args.group),
+                                                                                  args.group,
+                                                                                  sat_mask_full),
                                               num_workers=args.threads,
                                               batch_size=args.batch,
                                               pin_memory=device is not torch.device('cpu'))
@@ -498,16 +691,31 @@ if __name__ == '__main__':
                        'data type': spectral.io.envi.dtype_to_envi[np.dtype(output_dtype).char],
                        'algorithm settings': '{' f'grouping: {args.group}, iterations: {args.iter}, ' +
                                              f'albedocorrection: {not args.noalbedo},' +
-                                             f'target spectrum: {args.spec},' +
+                                             f'saturationrejection: {args.saturation},' +
+                                             f'saturationwindow: {args.saturationwindow if args.saturationwindow is not None else (1945, 2485)},' +
+                                             f'saturationthreshold: {args.saturationthreshold if args.saturationthreshold is not None else 2.0},' +
+                                             f'target spectrum: {args.spec if args.spec is not None else "generate"},' +
                                              f'compute: {device_name}, batch: {args.batch}' '}'}
     if args.rdnfromgeo:
         output_metadata.update({'map info': rdn_file.metadata['map info']})
+    if args.saturation:
+        output_metadata.update({'band names': output_metadata['band names'] + ['Saturation Mask (dimensionless)']})
+        output_metadata.update({'bands': output_metadata['bands'] + 1})
+        output_metadata.update({'wavelength': np.concatenate((output_metadata['wavelength'], wave_keep[None, 0]))})
+        sat_idx = output_metadata['bands'] - 1
+    if args.hfdi:
+        output_metadata.update({'band names': output_metadata['band names'] + ['HFDI (dimensionless)']})
+        output_metadata.update({'bands': output_metadata['bands'] + 1})
+        output_metadata.update({'wavelength': np.concatenate((output_metadata['wavelength'], np.asarray((2430,))))})
+        hfdi_idx = output_metadata['bands'] - 1
     output_filename = f'{args.out}.hdr'
     output_file = spectral.io.envi.create_image(output_filename, output_metadata, force=args.overwrite, ext='')
     output_memmap = output_file.open_memmap(interleave='bip', writable=True)
     qprint(f'Filter output will be written to {output_filename}')
     if not args.noprefill:
         output_memmap[:, :, 3:] = NODATA
+    if args.saturation:
+        output_memmap[:, :, sat_idx] = sat_mask_full
 
     # Copy RGB bands to the output file
     output_memmap[:, :, :3] = rdn_file_memmap[:, :, rgb_idx]
@@ -523,24 +731,40 @@ if __name__ == '__main__':
         end = '\n' if step % 15 == 0 else ''
         qprint(f'{step}, ', end=end, flush=True)
         # Unpack data from the batched object
-        rdn_data, censor_mask, col_idx, load_times = batch
+        if args.saturation:
+            rdn_data, censor_mask, col_idx, load_times, sat_mask = batch
+        else:
+            rdn_data, censor_mask, col_idx, load_times = batch
+            sat_mask = None
+
+        # Compute HFDI
+        if args.hfdi:
+            hfdi = calculate_hfdi(rdn_data, wave_keep)
+
+        # Detect Saturation
+        if args.saturation:
+            # mask is now pre-calculated, it is unpacked as part of batch
+            # mask must be converted back to bool, as torch makes it uint8
+            sat_mask = sat_mask.cpu().numpy() >= 1
+            #sat_mask = get_saturation_mask(rdn_data, wave_keep,
+            #                               threshold=args.saturationthreshold, waverange=args.saturationwindow)
+            # Reduce data for further processing to only the non-saturated pixels; this flattens the data
+            rdn_data = rdn_data[~sat_mask, :].unsqueeze(0)  # batch size will be 1 when saturation is being applied
+        else:
+            # Flatten data into long columns, preserving first (0th) batch dimension and last (-1st) spectral dimension
+            # No-op if the rdn data is already spatially flattened
+            rdn_data = rdn_data.reshape((rdn_data.shape[0], np.prod(rdn_data.shape[1:-1]), rdn_data.shape[-1]))
 
         # Move data to desired compute device, and cast to appropriate data type for processing
         rdn_data = rdn_data.to(device=device, dtype=dtype)
-
-        # Flatten data into long columns, preserving first (0th) batch dimension and last (-1st) spectral dimension
-        # No-op if the rdn data is already spatially flattened
-        rdn_data = rdn_data.reshape((rdn_data.shape[0], np.prod(rdn_data.shape[1:-1]), rdn_data.shape[-1]))
 
         if args.onlypositiveradiance:  # Batch size is 1, so the first dimension can be eliminated within if statement
             # Identify pixels that have all positive radiance values, filter will only be applied on these pixels
             positive_mask = torch.ge(rdn_data, 0).all(dim=2)
 
             # Preallocate all outputs so that the results assignment can be masked by the positive pixels
-            mf_out = NODATA * torch.ones((1, positive_mask.shape[1], 1), out=mf_out if step > 1 else None, dtype=dtype,
-                                         device=device)
-            albedo_out = NODATA * torch.ones((1, positive_mask.shape[1], 1), out=albedo_out if step > 1 else None,
-                                             dtype=dtype, device=device)
+            mf_out = NODATA * torch.ones((1, positive_mask.shape[1], 1), dtype=dtype, device=device)
+            albedo_out = NODATA * torch.ones((1, positive_mask.shape[1], 1), dtype=dtype, device=device)
 
             # Do main filter processing on masked pixels
             mf_out[positive_mask, :], albedo_out[positive_mask, :] = acrwl1mf(rdn_data[positive_mask, :].unsqueeze_(0),
@@ -555,24 +779,55 @@ if __name__ == '__main__':
         albedo_out = albedo_out.to(device=torch.device('cpu'))
 
         if args.rdnfromgeo:  # Modify how the data gets written back
-            # col_idx is actually glt_idx, which is a boolean mask array stored as torch.uint8
+            # col_idx is actually glt_idx, which is a boolean mask array stored as torch.uint8  # TODO use torch.bool
             glt_idx = col_idx.cpu().numpy()[0, ...] == 1
+            if args.hfdi:
+                output_memmap[glt_idx, hfdi_idx] = hfdi
+            if args.saturation:
+                # Write out data that is calculated on original 'full' data first
+                # data is already written out to file output_memmap[glt_idx, sat_idx] = sat_mask
+                # Now modify the glt_index for writing data that is calculated on a further subset.
+                # Saturation Mask is only calculated on 'active' data -- where glt_idx is True
+                # The mask needs to get and-ed with the mask at these True locations only
+                np.place(glt_idx, glt_idx, np.logical_and(glt_idx[glt_idx], np.logical_not(sat_mask)))
             # Data just has to be written back to where it came from, marked by glt_idx, flat order is preserved
             output_memmap[glt_idx, 3] = mf_out[0, :, 0]
             output_memmap[glt_idx, 4] = albedo_out[0, :, 0]
 
         else:
-            # Un-flatten the multiple columns back to their original places and write to disk
+            # Un-flatten the (maybe multiple) columns back to their original places and write to disk
             censor_mask_bool = censor_mask.cpu().numpy() == 0
             for i in range(args.batch):
                 temp_out_reshape = NODATA * np.ones((censor_mask_bool.shape[1], col_idx.shape[1])).flatten()
-                temp_out_reshape[np.repeat(censor_mask_bool[i], args.group)] = mf_out[i, :, 0].numpy()
-                temp_out_reshape = temp_out_reshape.reshape(censor_mask_bool.shape[1], col_idx.shape[1])
-                output_memmap[:, col_idx[i], 3] = temp_out_reshape.squeeze()
                 temp_albedo_reshape = NODATA * np.ones((censor_mask_bool.shape[1], col_idx.shape[1])).flatten()
+                if args.saturation:  # Expand results back to size of censor_mask_bool, then following logic is same
+                    # This is simplified because the batch size must be 1 when saturation is applied
+                    # sat_mask is the size that is expected for censor unmasking, so make these expansions the same size
+                    expand_mf = NODATA * torch.ones(sat_mask.shape, dtype=dtype).unsqueeze_(-1)
+                    expand_albedo = NODATA * torch.ones(sat_mask.shape, dtype=dtype).unsqueeze_(-1)
+                    expand_mf[~sat_mask, :] = mf_out
+                    expand_albedo[~sat_mask, :] = albedo_out
+                    expand_mf = expand_mf.view(1, -1, 1)
+                    expand_albedo = expand_albedo.view(1, -1, 1)
+                    mf_out = expand_mf
+                    albedo_out = expand_albedo
+                temp_out_reshape[np.repeat(censor_mask_bool[i], args.group)] = mf_out[i, :, 0].numpy()
                 temp_albedo_reshape[np.repeat(censor_mask_bool[i], args.group)] = albedo_out[i, :, 0].numpy()
+                temp_out_reshape = temp_out_reshape.reshape(censor_mask_bool.shape[1], col_idx.shape[1])
                 temp_albedo_reshape = temp_albedo_reshape.reshape(censor_mask_bool.shape[1], col_idx.shape[1])
+                output_memmap[:, col_idx[i], 3] = temp_out_reshape.squeeze()
                 output_memmap[:, col_idx[i], 4] = temp_albedo_reshape.squeeze()
+                if args.saturation:  # Write back
+                    pass
+                    # Batch size must be 1, so this simplifies. censor_mask still applies though
+                    #output_memmap[:, col_idx[i], sat_idx] = sat_mask
+                    # saturation mask has already been written out to file
+                    #  output_memmap[np.logical_and(censor_mask_bool[i][:, None],
+                    #                             (col_idx[i, None].numpy().T == np.arange(output_memmap.shape[1])).any(axis=0)[None, :]), sat_idx] = sat_mask.numpy().astype(np.float64 if args.writedouble else np.float32).flat
+                if args.hfdi:  # Calculated everywhere, so disregard saturation masking; censor mask still applies
+                    # Is not flattened, so unflattening is not required
+                    output_memmap[np.logical_and(censor_mask_bool[i][:, None],
+                                                 (col_idx[i, None].numpy().T == np.arange(output_memmap.shape[1])).any(axis=0)[None, :]), hfdi_idx] = hfdi.numpy().astype(np.float64 if args.writedouble else np.float32).flat
 
         if args.asap:
             output_memmap.flush()
@@ -604,3 +859,6 @@ if __name__ == '__main__':
         qprint(f'Wrote the geocorrected filter output to {geo_filename}')
 
     qprint(f'Done with all requested processing for {args.rdn}')
+
+if __name__ == '__main__':
+    main()
