@@ -1,11 +1,17 @@
 # MAG1C:  Matched filter with Albedo correction and reweiGhted L1 sparsity Code
 
-## Introduction
-mag1c is designed for fast detection and concentration estimation of trace gas from imaging spectrometer data.
+[![DOI:10.NNN/xxxx.xxxx](https://img.shields.io/badge/DOI-10.NNN%2Fxxxx.xxxx-blue)](https://doi.org)
 
-<!-- This algorithm was published in *journal* on *date*. See the article at the publisher's site [here]().
-If you use this algorithm or results from it in your own publication, please cite:
-**citation here once published** -->
+Fast concentration estimation and detection of trace gas absorption from imaging spectrometer data.
+
+<!--
+## Citation
+If you use this tool in a program or publication, please acknowledge its author(s) by adding the following reference:
+
+<citation here>
+-->
+## Installation
+``pip install mag1c``
 
 ## Requirements
 mag1c depends on these software packages for math routines and data I/O. 
@@ -13,7 +19,7 @@ mag1c depends on these software packages for math routines and data I/O.
 Python 3.6 (or newer) and the following python packages and versions:
 - [`numpy`](https://www.numpy.org/)
 - [`spectral`](https://www.spectralpython.net/)
-- [`torch`](https://pytorch.org) 1.1+
+- [`torch`](https://pytorch.org) 1.3+
 - [`scikit-image`](https://scikit-image.org/)
 - [`scipy`](https://www.scipy.org/install.html) (optional: Only required if you want to load target spectra from `.mat` files.)
 
@@ -102,10 +108,14 @@ There are numerous options/flags that can be provided to the mag1c script. Run `
 ```
 usage: mag1c [--spec TARGET_SPEC_FILE] [--out OUTPUT_FILE] [--gpu] [-i N]
              [-g N] [-b N] [-s] [-t N] [-o] [-d] [-p] [--asap] [--noalbedo]
-             [--nonnegativeoff] [--onlypositiveradiance] [--outputgeo GLT]
-             [--geo GLT] [--optimize] [-q] [--version] [-T THRESHOLD]
-             [-W LOW HIGH] [-M [RADIUS]] [-A [AREA]] [--hfdi]
-             [--saturation-processing-block-length N] [-S] [-h]
+             [--no-albedo-output] [--nonnegativeoff] [--onlypositiveradiance]
+             [--outputgeo GLT] [--geo GLT] [--optimize] [-q] [--version]
+             [-T THRESHOLD] [-W LOW HIGH] [-M [RADIUS]] [-A [PX_AREA]]
+             [--hfdi] [--saturation-processing-block-length N] [--no-sparsity]
+             [--covariance-update-scaling COVARIANCE_UPDATE_SCALING]
+             [--covariance-lerp-alpha COVARIANCE_LERP_ALPHA]
+             [--use-wavelength-range MIN MAX]
+             [--visible-mask-growing-threshold FLOAT] [-S] [-h]
              RADIANCE_FILE
 
        M atched filter with
@@ -115,6 +125,7 @@ usage: mag1c [--spec TARGET_SPEC_FILE] [--out OUTPUT_FILE] [--gpu] [-i N]
        C ode
 
 University of Utah Albedo-Corrected Reweighted-L1 Matched Filter
+v1.2.0.alpha1
 
 positional arguments:
   RADIANCE_FILE         ENVI format radiance file to process -- Provide the
@@ -149,6 +160,7 @@ optional arguments:
                         the memory-mapped file caching. (default: False)
   --noalbedo            Calculate results withOUT albedo correction. (default:
                         False).
+  --no-albedo-output    Do not include albedo band in result file.
   --nonnegativeoff      Do not apply non-negativity constraint to MF result.
                         (default: False)
   --onlypositiveradiance
@@ -168,7 +180,7 @@ optional arguments:
   --version             show program's version number and exit
   -T THRESHOLD, --saturationthreshold THRESHOLD
                         specify the threshold used for classifying pixels as
-                        saturated (default: 2.0)
+                        saturated (default: 5.0)
   -W LOW HIGH, --saturationwindow LOW HIGH
                         specify the wavelength window, as "-W LOW HIGH",
                         within which to detect saturation (default: 1945, 2485
@@ -178,8 +190,9 @@ optional arguments:
                         cover (and exclude) flare-related anomalies. This
                         value must include units: meters (abbreviated as m) or
                         pixels (abbreviated as px). If flag is given without a
-                        value, 100m will be used.
-  -A [AREA], --mingrowarea [AREA]
+                        value, 100m will be used. This is a combined flag for
+                        enabling mask growing.
+  -A [PX_AREA], --mingrowarea [PX_AREA]
                         minimum number of pixels that must constitute a
                         2-connected saturation region for it to be grown by
                         the mask-grow-radius value. If flag is provided
@@ -188,6 +201,13 @@ optional arguments:
   --hfdi                calculate the Hyperspectral Fire Detection Index (doi:
                         10.1016/j.rse.2009.03.010) and append band to output.
   --saturation-processing-block-length N
+  --no-sparsity
+  --covariance-update-scaling COVARIANCE_UPDATE_SCALING
+  --covariance-lerp-alpha COVARIANCE_LERP_ALPHA
+  --use-wavelength-range MIN MAX
+  --visible-mask-growing-threshold FLOAT
+                        Restrict mask growing to only occur when 500 nm
+                        radiance is less than this value.
   -S, --saturation      enable saturation detection (and avoid processing such
                         pixels). This flag overrides any batch size setting to
                         1. Required if any saturation related flags are
@@ -196,6 +216,7 @@ optional arguments:
 
 When using this software, please cite: 
  Foote et al. 2019, "Title Here" doi:xxxx.xxxx
+
 ```
 
 

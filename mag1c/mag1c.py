@@ -51,6 +51,12 @@ from typing import Tuple, Optional, Union, List
 
 RGB = [640, 550, 460]
 NODATA = -9999
+SAT_THRESH_DEFAULT = 5.0
+try:  # get version from packaging information (i.e. pip installation metadata)
+    import pkg_resources
+    SCRIPT_VERSION = pkg_resources.get_distribution('mag1c').version
+except Exception:  # otherwise, assume this is a development version
+    SCRIPT_VERSION = '0.0.0-dev0'
 
 
 @torch.no_grad()
@@ -58,7 +64,11 @@ def acrwl1mf(x: torch.Tensor,
              template: torch.Tensor,
              num_iter: int,
              albedo_override: bool,
-             zero_override: bool) -> Tuple[torch.Tensor, torch.Tensor]:
+             zero_override: bool,
+             sparse_override: bool,
+             covariance_update_scaling: float,
+             alpha: float,
+             mask: Optional[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
     """Calculate the albedo-corrected reweighted-L1 matched filter on radiance data.
 
     :param x: Radiance Data to process. See notes below on format.
@@ -66,7 +76,12 @@ def acrwl1mf(x: torch.Tensor,
     :param num_iter: Number of iterations to run.
     :param albedo_override: Do not calculate or apply albedo correction factor.
     :param zero_override: Do not apply non-negativity constraint on matched filter results.
-    :returns
+    :param sparse_override: Do not use sparse regularization in iterations when True.
+    :param covariance_update_scaling: scalar value controls contribution of previous filter values in removing target
+        signal in covariance and mean updates.
+    :param alpha: scalar value to perform diagonal scaling of the covariance matrix
+    :param mask: An optional mask to mark where data should contribute to covariance and mean.
+    :returns mf, albedo
 
         x must be 3-dimensional:
         batch (columns or groups of columns) x
@@ -81,39 +96,47 @@ def acrwl1mf(x: torch.Tensor,
     dtype = x.dtype
     device = x.device
     N = x.shape[1]  # number of samples
+    if mask is None:
+        mask = torch.ones_like(x, dtype=torch.bool)
+    mask = torch.squeeze(mask, 0)
     regularizer = torch.zeros(x.shape[0], x.shape[1], 1, dtype=dtype, device=device)
-    modx = torch.zeros_like(x, dtype=dtype, device=device, layout=torch.strided)
+    modx = x[:, mask]#torch.zeros_like(x, dtype=dtype, device=device, layout=torch.strided)
     template = template.unsqueeze(0).unsqueeze(0)
     scaling = torch.tensor(1e5, dtype=dtype, device=device)
     epsilon = torch.tensor(1e-9, dtype=dtype, device=device)
+    covariance_update_scaling = torch.tensor(-covariance_update_scaling, dtype=dtype, device=device)
+    alpha = torch.tensor(alpha, dtype=dtype, device=device)
     # energy = torch.zeros(num_iter + 1, dtype=dtype, device=device)
     # Initialize with normal robust matched filter
-    mu = torch.mean(x, 1, keepdim=True)  # [batch x 1 x spectrum]
+    mu = torch.mean(modx, 1, keepdim=True)  # [batch x 1 x spectrum]
     if albedo_override:
         R = torch.ones((x.shape[0], N, 1), dtype=dtype, device=device)
     else:
         R = torch.div(torch.bmm(x, torch.transpose(mu, 1, 2)),  # [b x p x s] * [b x s x 1] = [b x p x 1]
                       torch.bmm(mu, torch.transpose(mu, 1, 2)))  # [b x 1 x s] * [b x s x 1] = [b x 1 x 1]
     target = torch.mul(template, mu)  # [1 x 1 x s] * [b x 1 x s] = [b x 1 x s]
-    xmean = x - mu
+    xmean = modx - mu
     C = torch.div(torch.bmm(torch.transpose(xmean, 1, 2), xmean), N)  # [b x s x p] * [b x p x s] = [b x s x s]
+    C = C.lerp_(torch.diag_embed(torch.diagonal(C, dim1=-2, dim2=-1)), alpha)  # C = (1-alpha) * S + alpha * diag(S)
     # Cit, _ = torch.gesv(torch.transpose(target, 1, 2), C)  # [b x s x 1] \ [b x s x s] = [b x s x 1]
     Cit = torch.cholesky_solve(torch.transpose(target, 1, 2), torch.cholesky(C, upper=False), upper=False)
     normalizer = torch.bmm(target, Cit)  # [b x 1 x s] * [b x s x 1] = [b x 1 x 1]
-    mf = torch.div(torch.bmm(xmean, Cit), torch.mul(R, normalizer))  # [b x p x s] * [b x s x 1] = [b x p x 1]
+    mf = torch.div(torch.bmm(x - mu, Cit), torch.mul(R, normalizer))  # [b x p x s] * [b x s x 1] = [b x p x 1]
     if not zero_override:
         mf = torch.nn.functional.relu_(mf)  # max(mf, 0)
     # TODO Calculate Energy
     # Reweighted L1 Algorithm
     for i in range(num_iter):
         # Calculate new regularizer weights
-        regularizer = torch.reciprocal(torch.mul(R, mf + epsilon), out=regularizer)
+        if not sparse_override:  # regularizer pre-defined as zeros.
+            regularizer = torch.reciprocal(torch.mul(R, mf + epsilon), out=regularizer)
         # Re-calculate statistics
-        modx = torch.add(x, alpha=-1, other=R * mf * target, out=modx)
+        modx = torch.add(x[:, mask], alpha=covariance_update_scaling, other=R[:, mask] * mf[:, mask] * target, out=modx)
         mu = torch.mean(modx, 1, keepdim=True, out=mu)
         target = torch.mul(template, mu, out=target)
         xmean = torch.add(modx, alpha=-1, other=mu, out=xmean)
         C = torch.div(torch.bmm(torch.transpose(xmean, 1, 2), xmean), other=torch.tensor(N), out=C)
+        C = C.lerp_(torch.diag_embed(torch.diagonal(C, dim1=-2, dim2=-1)), alpha)
         Cit = torch.cholesky_solve(torch.transpose(target, 1, 2), torch.cholesky(C, upper=False), upper=False)
         # Compute matched filter with regularization
         normalizer = torch.bmm(target, Cit, out=normalizer)
@@ -148,7 +171,7 @@ def get_saturation_mask(data: np.ndarray, wave: np.ndarray,
                         threshold: Optional[float] = None,
                         waverange: Optional[Tuple[float, float]] = None) -> np.ndarray:
     """Calculates a mask of pixels that appear saturated (in the SWIR, by default).
-    Pixels containing ANY radiance value above the provided threshold (default 2.0) within
+    Pixels containing ANY radiance value above the provided threshold (default 6.0) within
     the wavelength window provided (default 1945 - 2485 nm).
 
     :param data: Radiance image to screen for sensor saturation.
@@ -159,7 +182,7 @@ def get_saturation_mask(data: np.ndarray, wave: np.ndarray,
     :return: Binary Mask with 1/True where saturation occurs, 0/False for normal pixels
     """
     if threshold is None:
-        threshold = 2.0
+        threshold = SAT_THRESH_DEFAULT
     if waverange is None:
         waverange = (1945, 2485)
     is_saturated = (data[..., np.logical_and(wave >= waverange[0], wave <= waverange[1])] > threshold).any(axis=-1)
@@ -181,7 +204,7 @@ def calculate_hfdi(data: Union[np.ndarray, torch.Tensor],
     return hfdi
 
 
-def generate_template_from_bands(centers:Union[np.ndarray, List], fwhm:Union[np.ndarray, List]) -> np.ndarray:
+def generate_template_from_bands(centers: Union[np.ndarray, List], fwhm: Union[np.ndarray, List]) -> np.ndarray:
     """Calculate a unit absorption spectrum for methane by convolving with given band information.
 
     :param centers: wavelength values for the band centers, provided in nanometers.
@@ -196,8 +219,8 @@ def generate_template_from_bands(centers:Union[np.ndarray, List], fwhm:Union[np.
         raise RuntimeError('Band Wavelengths Centers/FWHM data contains non-finite data (NaN or Inf).')
     if centers.shape[0] != fwhm.shape[0]:
         raise RuntimeError('Length of band center wavelengths and band fwhm arrays must be equal.')
-    lib = spectral.io.envi.open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'z30sa0200ga00wv2.hdr'),
-                                os.path.join(os.path.dirname(os.path.abspath(__file__)), 'z30sa0200ga00wv2.lut'))
+    lib = spectral.io.envi.open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ch4.hdr'),
+                                os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ch4.lut'))
     rads = np.asarray(lib.asarray()).squeeze()
     wave = np.asarray(lib.bands.centers)
     concentrations = np.asarray([0, 500, 1000, 2000, 4000, 8000, 16000])
@@ -366,8 +389,8 @@ class GroupedRadianceMemmappedFileDataset(torch.utils.data.Dataset):
         sat_mask = None if self.sat_mask_full is None else self.sat_mask_full[:, col_idx][~censor_mask, ...]
         # Store how long this process took
         load_time = time.time() - load_time
-        # Convert censor_mask to integer type (PyTorch does not support bool)
-        censor_mask = censor_mask.astype(np.uint8)
+        # # Convert censor_mask to integer type (PyTorch does not support bool)
+        # censor_mask = censor_mask.astype(np.uint8)
         # Return data and where it is from in the image to main thread
         if sat_mask is not None:
             return data, censor_mask, col_idx, load_time, sat_mask
@@ -430,9 +453,9 @@ class GeocorrectedGroupedRadianceMemmappedFileDataset(torch.utils.data.Dataset):
         sat_mask = None if self.sat_mask_full is None else self.sat_mask_full[glt_idx]
         # Store how long this process took
         load_time = time.time() - load_time
-        # Convert censor_mask to integer type (PyTorch does not support bool)
-        censor_mask = censor_mask.astype(np.uint8)
-        glt_idx = glt_idx.astype(np.uint8)
+        # # Convert censor_mask to integer type (PyTorch does not support bool)
+        # censor_mask = censor_mask.astype(np.uint8)
+        # glt_idx = glt_idx.astype(np.uint8)
         # Return data and where it is from in the image to main thread
         if sat_mask is not None:
             return data, censor_mask, glt_idx, load_time, sat_mask
@@ -446,6 +469,10 @@ class QuietPrinter(object):
         if not self.quiet:
             print(*args, **kwargs)
 
+    def set_quiet(self, be_quiet):
+        self.quiet = be_quiet
+
+qprint = QuietPrinter(False)
 
 def main():
     parser = argparse.ArgumentParser(description='       M atched filter with\n'
@@ -453,7 +480,8 @@ def main():
                                                  ' rewei G hted\n'
                                                  '     L 1 sparsity\n'
                                                  '       C ode\n\n'
-                                                 'University of Utah Albedo-Corrected Reweighted-L1 Matched Filter',
+                                                 'University of Utah Albedo-Corrected Reweighted-L1 Matched Filter\n'
+                                                 f'v{SCRIPT_VERSION}',
                                      epilog='When using this software, please cite: \n' +
                                             ' Foote et al. 2019, "Title Here" doi:xxxx.xxxx\n',
                                      formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -494,6 +522,7 @@ def main():
     #                          ' take significantly longer to complete and is meant for debugging. NOT YET IMPLEMENTED')
     parser.add_argument('--noalbedo', action='store_true',
                         help='Calculate results withOUT albedo correction. (default: %(default)s).')
+    parser.add_argument('--no-albedo-output', action='store_true', help='Do not include albedo band in result file.')
     parser.add_argument('--nonnegativeoff', action='store_true',
                         help='Do not apply non-negativity constraint to MF result. (default: %(default)s)')
     parser.add_argument('--onlypositiveradiance', action='store_true',
@@ -509,18 +538,20 @@ def main():
     parser.add_argument('-q', '--quiet', action='store_true',
                         help='Do not write status updates to console.')
     parser.add_argument('--version', action='version',
-                        version='%(prog)s v1.1.1.dev7\n University of Utah Albedo-Corrected Reweighted-L1 ' +
-                                'Matched Filter.\n See Foote et al. 2019 DOI: XXXx.xxxx for details.')
+                        version='%(prog)s \n University of Utah Albedo-Corrected Reweighted-L1 ' +
+                                f'Matched Filter. v{SCRIPT_VERSION}\n See Foote et al. 2019 DOI: XXXx.xxxx for details.')
     parser.add_argument('-T', '--saturationthreshold', type=float, metavar='THRESHOLD',
-                        help='specify the threshold used for classifying pixels as saturated (default: 2.0)')
+                        help='specify the threshold used for classifying pixels as saturated '
+                             f'(default: {SAT_THRESH_DEFAULT})')
     parser.add_argument('-W', '--saturationwindow', type=float, nargs=2, metavar=('LOW', 'HIGH'),
                         help='specify the wavelength window, as "-W LOW HIGH", within which to detect saturation '
                              '(default: 1945, 2485 nanometers)')
     parser.add_argument('-M', '--maskgrowradius', type=str, metavar='RADIUS', nargs='?', const='100m', default=None,
                         help='radius to use for expanding the saturation mask to cover (and exclude) flare-related '
                              'anomalies. This value must include units: meters (abbreviated as m) or pixels '
-                             '(abbreviated as px). If flag is given without a value, 100m will be used.')
-    parser.add_argument('-A', '--mingrowarea', type=int, metavar='AREA', nargs='?', const=6, default=None,
+                             '(abbreviated as px). If flag is given without a value, 100m will be used. This is a '
+                             'combined flag for enabling mask growing.')
+    parser.add_argument('-A', '--mingrowarea', type=int, metavar='PX_AREA', nargs='?', const=6, default=None,
                         help='minimum number of pixels that must constitute a 2-connected saturation region for it to '
                              'be grown by the mask-grow-radius value. If flag is provided without a value, 6 pixels '
                              'will be assumed as the value.')
@@ -528,6 +559,12 @@ def main():
                         help='calculate the Hyperspectral Fire Detection Index (doi: 10.1016/j.rse.2009.03.010) '
                              'and append band to output.')
     parser.add_argument('--saturation-processing-block-length', type=int, metavar='N', default=500)
+    parser.add_argument('--no-sparsity', action='store_true')
+    parser.add_argument('--covariance-update-scaling', type=float, default=1.0)
+    parser.add_argument('--covariance-lerp-alpha', type=float, default=0)
+    parser.add_argument('--use-wavelength-range', type=float, default=(2125, 2490), nargs=2, metavar=('MIN', 'MAX'))
+    parser.add_argument('--visible-mask-growing-threshold', type=float, default=9.5, metavar='FLOAT',
+                        help='Restrict mask growing to only occur when 500 nm radiance is less than this value.')
     # The saturation argument is required only if the saturation threshold or window has been specified.
     # Save all (potentially) required arguments until after this initial parse so that we can pass without errors.
     args, rem_args = parser.parse_known_args()
@@ -546,7 +583,7 @@ def main():
     args = parser.parse_args(rem_args, namespace=args)
     start = time.time()
 
-    qprint = QuietPrinter(args.quiet)
+    qprint.set_quiet(args.quiet)
     qprint(f'Beginning processing of {args.rdn}')
     if args.onlypositiveradiance and args.batch is not 1:
         args.batch = 1
@@ -615,39 +652,45 @@ def main():
     rgb_idx = get_rbg_band_indexes(wavelengths)
     rgb_wavelengths = wavelengths[rgb_idx]
 
-    # Determine mask of what wavelengths will be used in processing
+    # Determine mask of what wavelengths will be used in processing -- these bands are independent of thresholding
     band_keep = get_mask_bad_bands(wavelengths)
+    band_keep[wavelengths < args.use_wavelength_range[0]] = False
+    band_keep[wavelengths > args.use_wavelength_range[1]] = False
     wave_keep = wavelengths[band_keep]
 
-    # If thresholding is enabled, calculate the mask and preprocess with dilation
+    # If thresholding is enabled, calculate the mask and (if enabled) preprocess with dilation
     sat_mask_full = None
     if args.saturation:
         qprint('Detecting saturated pixels...', end='')
         if args.maskgrowradius is not None:
             grow_radius_px = get_radius_in_pixels(args.maskgrowradius, rdn_file.metadata)
             selem = morphology.disk(radius=grow_radius_px, dtype=np.bool)
+            idx_500 = np.argmin(np.absolute(wavelengths - 500))
         sat_mask_full = np.zeros((rdn_file.nrows, rdn_file.ncols), dtype=np.uint8)
         block_overlap = np.ceil((args.mingrowarea if args.mingrowarea is not None else 0) + (grow_radius_px if args.maskgrowradius is not None else 0)).astype(np.int64)
         block_step = args.saturation_processing_block_length
         block_length = block_step + block_overlap
         line_idx_start_values = np.arange(start=0, stop=rdn_file.nrows, step=block_step)
         for line_block_start in line_idx_start_values:
+            qprint('.', end='', flush=True)
             line_block_end = np.minimum(rdn_file.nrows, line_block_start + block_length)
             block_data = rdn_file.read_subregion((line_block_start, line_block_end), (0, rdn_file.ncols))
-            sat_mask_block = get_saturation_mask(block_data[:, :, band_keep], wave_keep)
+            sat_mask_block = get_saturation_mask(data=block_data[:, :, :], wave=wavelengths,
+                                                 threshold=args.saturationthreshold, waverange=args.saturationwindow)
             if args.maskgrowradius is not None:
                 sat_mask_grow_regions = np.zeros_like(sat_mask_block, dtype=np.uint8)
                 for region in measure.regionprops(measure.label(sat_mask_block.astype(np.uint8), connectivity=2)):
                     if region.area >= args.mingrowarea:
                         # Mark these large regions in the mask to get dilated
                         for c in region.coords:
-                            sat_mask_grow_regions[c[0], c[1]] = 1
+                            sat_mask_grow_regions[c[0], c[1]] = 1 if block_data[c[0], c[1], idx_500] < args.visible_mask_growing_threshold else 0
                 sat_mask_large_grown = morphology.binary_dilation(image=sat_mask_grow_regions.astype(np.bool),
                                                                   selem=selem)
                 sat_mask_out = sat_mask_large_grown.astype(np.uint8)
                 sat_mask_out[sat_mask_block] = np.asarray(2, dtype=np.uint8)
                 sat_mask_block = sat_mask_out
-            sat_mask_full[line_block_start:line_block_end, ...][sat_mask_block == 1] = 1
+            sat_mask_full[line_block_start:line_block_end, ...][
+                np.logical_and(sat_mask_block == 1, sat_mask_full[line_block_start:line_block_end, ...] != 2)] = 1
             sat_mask_full[line_block_start:line_block_end, ...][sat_mask_block == 2] = 2
         qprint(' Done.')
 
@@ -675,34 +718,48 @@ def main():
 
     # Create an image file for the output
     output_metadata = {'description': 'University of Utah Albedo-Corrected Reweighted-L1 Matched Filter Result. ' +
-                                      'Citation doi:xxxx.xxxx',
+                                      'v' + SCRIPT_VERSION +
+                                      '  Citation doi:xxxx.xxxx',
                        'wavelength': np.concatenate((rgb_wavelengths,
-                                                     [wavelengths[np.argmin(target[:, 1])]],
-                                                     [wavelengths[0]])),
+                                                     [wavelengths[np.argmin(target[:, 1])]])),
                        'wavelength units': rdn_file.metadata[
                            'wavelength units'] if 'wavelength units' in rdn_file.metadata else 'Nanometers',
                        'data ignore value': NODATA,
                        'band names': ['Red Radiance (uW nm-1 cm-2 sr-1)', 'Green Radiance', 'Blue Radiance',
-                                      'Matched Filter Results (ppm m)', 'Albedo Factor (dimensionless)'],
+                                      ('Masked ' if args.saturation else '') + 'Matched Filter Results (ppm m)'],
                        'interleave': 'bsq',
                        'lines': rdn_file_memmap.shape[0],
                        'samples': rdn_file_memmap.shape[1],
-                       'bands': 5,
+                       'bands': 4,
                        'data type': spectral.io.envi.dtype_to_envi[np.dtype(output_dtype).char],
-                       'algorithm settings': '{' f'grouping: {args.group}, iterations: {args.iter}, ' +
-                                             f'albedocorrection: {not args.noalbedo},' +
-                                             f'saturationrejection: {args.saturation},' +
-                                             f'saturationwindow: {args.saturationwindow if args.saturationwindow is not None else (1945, 2485)},' +
-                                             f'saturationthreshold: {args.saturationthreshold if args.saturationthreshold is not None else 2.0},' +
-                                             f'target spectrum: {args.spec if args.spec is not None else "generate"},' +
-                                             f'compute: {device_name}, batch: {args.batch}' '}'}
+                       'algorithm settings': '{' f'version: {SCRIPT_VERSION}, ' +
+                                             f'grouping: {args.group}, iterations: {args.iter}, ' +
+                                             f'albedocorrection: {not args.noalbedo}, ' +
+                                             f'saturationrejection: {args.saturation}, ' +
+                                             (f'saturationwindow: {args.saturationwindow if args.saturationwindow is not None else (1945, 2485)}, ' if args.saturation else '') +
+                                             (f'saturationthreshold: {args.saturationthreshold if args.saturationthreshold is not None else SAT_THRESH_DEFAULT}, ' if args.saturation else '') +
+                                             f'target spectrum: {args.spec if args.spec is not None else "generate"}, ' +
+                                             f'compute: {device_name}, batch: {args.batch}, ' +
+                                             (f'buffer distance: {args.maskgrowradius if args.maskgrowradius is not None else 0}, ' if args.saturation else '') +
+                                             (f'min contiguous px for buffer: {args.mingrowarea if args.mingrowarea is not None else 0}, ' if args.saturation else '') +
+                                             f'filter wavelength range: {args.use_wavelength_range[0]} to {args.use_wavelength_range[1]}, ' +
+                                             (f'500 nm mask buffering threshold: {args.visible_mask_growing_threshold}, ' if args.saturation else '') +
+                                             f'parsed cmdline args: {args}'
+                                             '}'}
     if args.rdnfromgeo:
         output_metadata.update({'map info': rdn_file.metadata['map info']})
-    if args.saturation:
-        output_metadata.update({'band names': output_metadata['band names'] + ['Saturation Mask (dimensionless)']})
+    if not args.no_albedo_output:  # Must be first so that index is 4
+        output_metadata.update({'band names': output_metadata['band names'] + ['Albedo Factor (dimensionless)']})
         output_metadata.update({'bands': output_metadata['bands'] + 1})
-        output_metadata.update({'wavelength': np.concatenate((output_metadata['wavelength'], wave_keep[None, 0]))})
-        sat_idx = output_metadata['bands'] - 1
+        output_metadata.update({'wavelength': np.concatenate((output_metadata['wavelength'], [wavelengths[0]]))})
+    if args.saturation:
+        output_metadata.update({'band names': output_metadata['band names'] + ['Saturation Mask (dimensionless)', 'Unmasked Matched Filter Results (ppm m)']})
+        output_metadata.update({'bands': output_metadata['bands'] + 2})
+        output_metadata.update({'wavelength': np.concatenate((output_metadata['wavelength'],
+                                                              wave_keep[None, 0],  # Mask
+                                                              [wavelengths[np.argmin(target[:, 1])]]))})  # Unmasked MF
+        sat_idx = output_metadata['bands'] - 2
+        unmasked_idx = output_metadata['bands'] - 1
     if args.hfdi:
         output_metadata.update({'band names': output_metadata['band names'] + ['HFDI (dimensionless)']})
         output_metadata.update({'bands': output_metadata['bands'] + 1})
@@ -729,7 +786,7 @@ def main():
     # Loop over all batches of partitions in the image dataset
     for step, batch in enumerate(dataset, 1):
         end = '\n' if step % 15 == 0 else ''
-        qprint(f'{step}, ', end=end, flush=True)
+        qprint(f'{step:{np.ceil(np.log10(len(dataset))).astype(np.int)}}, ', end=end, flush=True)
         # Unpack data from the batched object
         if args.saturation:
             rdn_data, censor_mask, col_idx, load_times, sat_mask = batch
@@ -741,23 +798,24 @@ def main():
         if args.hfdi:
             hfdi = calculate_hfdi(rdn_data, wave_keep)
 
-        # Detect Saturation
+        # Saturation Processing
         if args.saturation:
             # mask is now pre-calculated, it is unpacked as part of batch
-            # mask must be converted back to bool, as torch makes it uint8
-            sat_mask = sat_mask.cpu().numpy() >= 1
+            # # mask must be converted back to bool, as torch makes it uint8
+            # sat_mask = sat_mask.cpu().numpy() >= 1
             #sat_mask = get_saturation_mask(rdn_data, wave_keep,
             #                               threshold=args.saturationthreshold, waverange=args.saturationwindow)
-            # Reduce data for further processing to only the non-saturated pixels; this flattens the data
-            rdn_data = rdn_data[~sat_mask, :].unsqueeze(0)  # batch size will be 1 when saturation is being applied
+            sat_mask = sat_mask.flatten().unsqueeze(0)
+            rdn_data = rdn_data.reshape(-1, rdn_data.shape[-1]).unsqueeze(0)  # batch size will be 1 when mask is used
+            # ^ that was a no-op for geocorrected data, because the data loader already flattens it in the glt lookup
         else:
             # Flatten data into long columns, preserving first (0th) batch dimension and last (-1st) spectral dimension
             # No-op if the rdn data is already spatially flattened
             rdn_data = rdn_data.reshape((rdn_data.shape[0], np.prod(rdn_data.shape[1:-1]), rdn_data.shape[-1]))
-
+            sat_mask = np.ones(rdn_data.shape, dtype=np.bool)
         # Move data to desired compute device, and cast to appropriate data type for processing
         rdn_data = rdn_data.to(device=device, dtype=dtype)
-
+        sat_mask = sat_mask.to(device=device, dtype=torch.bool) if sat_mask is not None else None
         if args.onlypositiveradiance:  # Batch size is 1, so the first dimension can be eliminated within if statement
             # Identify pixels that have all positive radiance values, filter will only be applied on these pixels
             positive_mask = torch.ge(rdn_data, 0).all(dim=2)
@@ -769,14 +827,22 @@ def main():
             # Do main filter processing on masked pixels
             mf_out[positive_mask, :], albedo_out[positive_mask, :] = acrwl1mf(rdn_data[positive_mask, :].unsqueeze_(0),
                                                                               spec, args.iter, args.noalbedo,
-                                                                              args.nonnegativeoff)
+                                                                              args.nonnegativeoff, args.no_sparsity,
+                                                                              args.covariance_update_scaling,
+                                                                              args.covariance_lerp_alpha,
+                                                                              torch.logical_not(sat_mask) if sat_mask is not None else None)
         else:
             # Do main filter processing
-            mf_out, albedo_out = acrwl1mf(rdn_data, spec, args.iter, args.noalbedo, args.nonnegativeoff)
+            mf_out, albedo_out = acrwl1mf(rdn_data,
+                                          spec, args.iter, args.noalbedo,
+                                          args.nonnegativeoff, args.no_sparsity,
+                                          args.covariance_update_scaling, args.covariance_lerp_alpha,
+                                          torch.logical_not(sat_mask) if sat_mask is not None else None)
 
         # Copy results back to cpu, no-op if already on cpu
         mf_out = mf_out.to(device=torch.device('cpu'))
         albedo_out = albedo_out.to(device=torch.device('cpu'))
+        sat_mask = sat_mask.to(device=torch.device('cpu'))
 
         if args.rdnfromgeo:  # Modify how the data gets written back
             # col_idx is actually glt_idx, which is a boolean mask array stored as torch.uint8  # TODO use torch.bool
@@ -789,10 +855,15 @@ def main():
                 # Now modify the glt_index for writing data that is calculated on a further subset.
                 # Saturation Mask is only calculated on 'active' data -- where glt_idx is True
                 # The mask needs to get and-ed with the mask at these True locations only
+                ## Write the 'full' unmasked data to the unmasked result band, then modify the glt index and data
+                output_memmap[glt_idx, unmasked_idx] = mf_out.squeeze(0).squeeze(1)
+                mf_out = mf_out[torch.logical_not(sat_mask)].unsqueeze_(0)
+                albedo_out = albedo_out[torch.logical_not(sat_mask)].unsqueeze_(0)
                 np.place(glt_idx, glt_idx, np.logical_and(glt_idx[glt_idx], np.logical_not(sat_mask)))
             # Data just has to be written back to where it came from, marked by glt_idx, flat order is preserved
             output_memmap[glt_idx, 3] = mf_out[0, :, 0]
-            output_memmap[glt_idx, 4] = albedo_out[0, :, 0]
+            if not args.no_albedo_output:
+                output_memmap[glt_idx, 4] = albedo_out[0, :, 0]
 
         else:
             # Un-flatten the (maybe multiple) columns back to their original places and write to disk
@@ -801,6 +872,13 @@ def main():
                 temp_out_reshape = NODATA * np.ones((censor_mask_bool.shape[1], col_idx.shape[1])).flatten()
                 temp_albedo_reshape = NODATA * np.ones((censor_mask_bool.shape[1], col_idx.shape[1])).flatten()
                 if args.saturation:  # Expand results back to size of censor_mask_bool, then following logic is same
+                    ## Write the 'full' unmasked data to the unmasked result band, then re-mask data and proceed with previous logic
+                    temp_full_reshape = temp_out_reshape.copy()
+                    temp_full_reshape[np.repeat(censor_mask_bool[i], args.group)] = mf_out[i, :, 0].numpy()
+                    temp_full_reshape = temp_full_reshape.reshape(censor_mask_bool.shape[1], col_idx.shape[1])
+                    output_memmap[:, col_idx[i], unmasked_idx] = temp_full_reshape.squeeze()
+                    mf_out = mf_out[torch.logical_not(sat_mask)].unsqueeze_(0)
+                    albedo_out = albedo_out[torch.logical_not(sat_mask)].unsqueeze_(0)
                     # This is simplified because the batch size must be 1 when saturation is applied
                     # sat_mask is the size that is expected for censor unmasking, so make these expansions the same size
                     expand_mf = NODATA * torch.ones(sat_mask.shape, dtype=dtype).unsqueeze_(-1)
@@ -816,7 +894,8 @@ def main():
                 temp_out_reshape = temp_out_reshape.reshape(censor_mask_bool.shape[1], col_idx.shape[1])
                 temp_albedo_reshape = temp_albedo_reshape.reshape(censor_mask_bool.shape[1], col_idx.shape[1])
                 output_memmap[:, col_idx[i], 3] = temp_out_reshape.squeeze()
-                output_memmap[:, col_idx[i], 4] = temp_albedo_reshape.squeeze()
+                if not args.no_albedo_output:
+                    output_memmap[:, col_idx[i], 4] = temp_albedo_reshape.squeeze()
                 if args.saturation:  # Write back
                     pass
                     # Batch size must be 1, so this simplifies. censor_mask still applies though
@@ -859,6 +938,7 @@ def main():
         qprint(f'Wrote the geocorrected filter output to {geo_filename}')
 
     qprint(f'Done with all requested processing for {args.rdn}')
+
 
 if __name__ == '__main__':
     main()

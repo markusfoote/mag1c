@@ -5,7 +5,12 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="mag1c", 
-    version="1.1.1.dev7",
+    use_scm_version={
+        'write_to': 'mag1c/version.py',
+        'write_to_template': '__version__ = "{version}"',
+        'fallback_version': '0.0.0-dev0'
+    },
+    setup_requires=['setuptools_scm'],
     author="Markus Foote",
     author_email="markusfoote@gmail.com",
     license='BSD',
@@ -27,7 +32,7 @@ setuptools.setup(
     ],
     python_requires='>=3.6',
     install_requires=[
-        'torch>=1.1',
+        'torch>=1.3',
         'numpy>=1.16.4',
         'spectral>=0.19',
         'scikit-image>=0.15.0',
@@ -36,7 +41,7 @@ setuptools.setup(
     entry_points={
         'console_scripts': [
             'mag1c = mag1c.mag1c:main',
-            'sparsemf = mag1c.mag1c:main'
+            'sparsemf = mag1c.mag1c:main',
         ]
     }
 )
