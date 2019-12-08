@@ -8,7 +8,9 @@
 #
 # BSD 3-Clause License
 #
-# Copyright (c) 2019, Scientific Computing and Imaging Institute and Utah Remote Sensing Applications Lab
+# Copyright (c) 2019, 
+#   Scientific Computing and Imaging Institute and 
+#   Utah Remote Sensing Applications Lab
 # All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
