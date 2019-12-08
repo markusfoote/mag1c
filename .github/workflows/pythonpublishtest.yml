@@ -1,8 +1,8 @@
-name: Upload Python Package
+name: Upload Pre-Release Python Package to test.pypi
 
 on:
   release:
-    types: [created]
+    types: [prereleased]
 
 jobs:
   deploy:
