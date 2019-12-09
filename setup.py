@@ -21,14 +21,15 @@ setuptools.setup(
     keywords='imaging spectrometer matched filter sparse pytorch',
     packages=setuptools.find_packages(),
     classifiers=[
-        "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.6",
+        "Programming Language :: Python :: 3.7",
         "License :: OSI Approved :: BSD License",
         "Operating System :: OS Independent",
         "Environment :: Console",
         "Intended Audience :: Science/Research",
         "Natural Language :: English",
         "Topic :: Scientific/Engineering :: Atmospheric Science",
-        "Development Status :: 4 - Beta",
+        "Development Status :: 4 - Beta",  # "Development Status :: 5 - Production/Stable"
     ],
     python_requires='>=3.6',
     install_requires=[
