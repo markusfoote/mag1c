@@ -487,7 +487,7 @@ def main():
                                      epilog='When using this software, please cite: \n' +
                                             ' Foote et al. 2019, "Title Here" doi:xxxx.xxxx\n',
                                      formatter_class=argparse.RawDescriptionHelpFormatter,
-                                     add_help=False)
+                                     add_help=False, allow_abbrev=False)
     parser.add_argument('--spec', type=str, metavar='TARGET_SPEC_FILE',
                         help='Target spectrum file to use. If no file is specified, a target spectrum will be '
                              'calculated from an internal methane absorption spectrum that is convolved to the band '
