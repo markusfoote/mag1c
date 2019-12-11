@@ -1,6 +1,6 @@
 # MAG1C:  Matched filter with Albedo correction and reweiGhted L1 sparsity Code
 
-[![DOI:10.NNN/xxxx.xxxx](https://img.shields.io/badge/DOI-10.NNN%2Fxxxx.xxxx-blue)](https://doi.org) ![GitHub release (latest SemVer including pre-releases)](https://img.shields.io/github/v/release/markusfoote/mag1c?include_prereleases&sort=semver) ![PyPI](https://img.shields.io/pypi/v/mag1c) ![PyPI - Python Version](https://img.shields.io/pypi/pyversions/mag1c) ![PyPI - License](https://img.shields.io/pypi/l/mag1c)
+[![Article DOI:10.NNN/xxxx.xxxx](https://img.shields.io/badge/Article%20DOI-10.NNN%2Fxxxx.xxxx-blue)](https://doi.org) ![GitHub release (latest SemVer including pre-releases)](https://img.shields.io/github/v/release/markusfoote/mag1c?include_prereleases&sort=semver) ![PyPI](https://img.shields.io/pypi/v/mag1c) ![PyPI - Python Version](https://img.shields.io/pypi/pyversions/mag1c) ![PyPI - License](https://img.shields.io/pypi/l/mag1c)
 
 Fast concentration estimation and detection of trace gas absorption from imaging spectrometer data.
 
@@ -21,43 +21,43 @@ Python 3.6 (or newer) and the following python packages and versions:
 - [`spectral`](https://www.spectralpython.net/)
 - [`torch`](https://pytorch.org) 1.3+
 - [`scikit-image`](https://scikit-image.org/)
-- [`scipy`](https://www.scipy.org/install.html) (optional: Only required if you want to load target spectra from `.mat` files.)
 
 ## GPU Processing
 If available, this code uses a compatible GPU for accelerated computation. See [https://pytorch.org/get-started/locally/](https://pytorch.org/get-started/locally/) for details on how to install pytorch with gpu support for your system. You will then need to install the other dependencies.
 
-You must use the option `--gpu` when running to enable GPU acceleration.
+The `--gpu` flag must be used to enable GPU acceleration.
 ### CPU-Only
-If you know that you will **not** use a GPU, you can install the CPU-only version of pytorch. See [https://pytorch.org/get-started/locally/#no-cuda-1](https://pytorch.org/get-started/locally/#no-cuda-1) for how to install the CPU-only version. At time of writing, the command for cpu-only torch through pip is: 
+If you know that you will **not** use a GPU, you can install the CPU-only version of pytorch. See [https://pytorch.org/get-started/locally/#no-cuda-1](https://pytorch.org/get-started/locally/#no-cuda-1) for how to install the CPU-only version. At time of writing, the install command for cpu-only torch and mag1c together through pip is: 
 ```
-pip3 install torch==1.3.1+cpu -f https://download.pytorch.org/whl/torch_stable.html
+pip3 install mag1c torch==1.3.1+cpu -f https://download.pytorch.org/whl/torch_stable.html
 ```
 
 ## Advanced Installation
-The simplest way to obtain this program is through `pip`. 
+The simplest way to obtain this program is through `pip`. To get the latest release:
 ```bash
 pip install mag1c
 ```
-to get the latest release, or 
+or, to install a specific released version:
 ```
 pip install magic==x.y.z
 ```
-to install a specific released version, or
+or, to get a specific point in history directly from github:
 ```
 pip install git+https://github.com/markusfoote/mag1c@tag#egg=mag1c
 ```
-to get a specific point in history directly from github, where ``tag`` is any tag (``v1.2.0``), branch name (e.g. ``master``) or commit hash. [PyPA has more detailed instructions.](https://pip.pypa.io/en/stable/reference/pip_install/#vcs-support)
+where ``tag`` is any tag (e.g. ``v1.2.0``), branch name (e.g. ``master``) or commit hash. [PyPA has more detailed instructions.](https://pip.pypa.io/en/stable/reference/pip_install/#vcs-support)
 
 This will install required dependencies (most notably, [pytorch](https://pytorch.org)) on linux systems. For Windows, or specific installation flavors of pytorch (like CPU-only), follow your choice of instructions on [PyTorch's website](https://pytorch.org/get-started/locally/), then install mag1c. Mag1c is compatible with PyTorch installed through `conda`, just make sure you are using the **environment's** `pip` to install mag1c, and activate the conda environment whenever you wish to run `mag1c`.
 
 ## Usage
+### Entrypoints
 This program can be invoked in multiple ways: 
 1. `python /path/to/mag1c.py` works whenever you have a copy of the `mag1c.py` script. The versioning metadata may not work well with a standalone script.
 2. `python -m mag1c` works when you install the python package (i.e. via `pip`).
 3. `mag1c` is a direct entry point to the program when you install via `pip`.
 4. `sparsemf` is exactly the same as `mag1c`, just with a debatably-more-readable name.
 
-## Runtime Options
+### Runtime Options
 There are numerous options/flags that can be provided to modify processing behavior. Run `mag1c --help` for a full description of the available arguments.
 
 ## Examples

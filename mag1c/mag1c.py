@@ -8,8 +8,8 @@
 #
 # BSD 3-Clause License
 #
-# Copyright (c) 2019, 
-#   Scientific Computing and Imaging Institute and 
+# Copyright (c) 2019,
+#   Scientific Computing and Imaging Institute and
 #   Utah Remote Sensing Applications Lab
 # All rights reserved.
 #
@@ -53,7 +53,7 @@ from typing import Tuple, Optional, Union, List
 
 RGB = [640, 550, 460]
 NODATA = -9999
-SAT_THRESH_DEFAULT = 5.0
+SAT_THRESH_DEFAULT = 6.0
 try:  # get version from packaging information (i.e. pip installation metadata)
     import pkg_resources
     SCRIPT_VERSION = pkg_resources.get_distribution('mag1c').version
@@ -535,38 +535,49 @@ def main():
                              'result will have the same name as the provided output file but ending with \'_geo\'.')
     parser.add_argument('--geo', type=str, metavar='GLT', dest='rdnfromgeo',
                         help='If using an orthocorrected radiance file, provide the corresponding GLT file. '
-                             'The output will also be geocorrected -- Do not use with --outputgeo to apply glt.')
+                             'The output will also be geocorrected. Do not use with --outputgeo to apply glt.')
     parser.add_argument('--optimize', action='store_true', help='Use Pytorch torchscript optimizations. Experimental.')
     parser.add_argument('-q', '--quiet', action='store_true',
                         help='Do not write status updates to console.')
     parser.add_argument('--version', action='version',
-                        version='%(prog)s \n University of Utah Albedo-Corrected Reweighted-L1 ' +
-                                f'Matched Filter. v{SCRIPT_VERSION}\n See Foote et al. 2019 DOI: XXXx.xxxx for details.')
+                        version='%(prog)s \n University of Utah Albedo-Corrected Reweighted-L1 Matched Filter.\n' +
+                                f'v{SCRIPT_VERSION}\n See Foote et al. 2019 DOI: XXXx.xxxx for details.')
     parser.add_argument('-T', '--saturationthreshold', type=float, metavar='THRESHOLD',
                         help='specify the threshold used for classifying pixels as saturated '
                              f'(default: {SAT_THRESH_DEFAULT})')
     parser.add_argument('-W', '--saturationwindow', type=float, nargs=2, metavar=('LOW', 'HIGH'),
-                        help='specify the wavelength window, as "-W LOW HIGH", within which to detect saturation '
-                             '(default: 1945, 2485 nanometers)')
-    parser.add_argument('-M', '--maskgrowradius', type=str, metavar='RADIUS', nargs='?', const='100m', default=None,
+                        help='specify the contiguous wavelength window within which to detect saturation, independent '
+                             'of bands used in the filter (default: 1945, 2485 nanometers)')
+    parser.add_argument('-M', '--maskgrowradius', type=str, metavar='RADIUS', nargs='?', const='150m', default=None,
                         help='radius to use for expanding the saturation mask to cover (and exclude) flare-related '
                              'anomalies. This value must include units: meters (abbreviated as m) or pixels '
-                             '(abbreviated as px). If flag is given without a value, 100m will be used. This is a '
-                             'combined flag for enabling mask growing.')
-    parser.add_argument('-A', '--mingrowarea', type=int, metavar='PX_AREA', nargs='?', const=6, default=None,
+                             '(abbreviated as px). If flag is given without a value, %(default)s will be used. This is '
+                             'a combined flag for enabling mask dilation and setting the distance to dilate.')
+    parser.add_argument('-A', '--mingrowarea', type=int, metavar='PX_AREA', nargs='?', const=5, default=None,
                         help='minimum number of pixels that must constitute a 2-connected saturation region for it to '
                              'be grown by the mask-grow-radius value. If flag is provided without a value, 6 pixels '
                              'will be assumed as the value.')
     parser.add_argument('--hfdi', action='store_true',
                         help='calculate the Hyperspectral Fire Detection Index (doi: 10.1016/j.rse.2009.03.010) '
                              'and append band to output.')
-    parser.add_argument('--saturation-processing-block-length', type=int, metavar='N', default=500)
-    parser.add_argument('--no-sparsity', action='store_true')
-    parser.add_argument('--covariance-update-scaling', type=float, default=1.0)
-    parser.add_argument('--covariance-lerp-alpha', type=float, default=0)
-    parser.add_argument('--use-wavelength-range', type=float, default=(2125, 2490), nargs=2, metavar=('MIN', 'MAX'))
-    parser.add_argument('--visible-mask-growing-threshold', type=float, default=9.5, metavar='FLOAT',
-                        help='Restrict mask growing to only occur when 500 nm radiance is less than this value.')
+    parser.add_argument('--saturation-processing-block-length', type=int, metavar='N', default=500,
+                        help='control the number of data lines pre-processed at once when using masking options')
+    parser.add_argument('--no-sparsity', action='store_true',
+                        help='disable computation of sparsity weighting factors and sets them to zero')
+    parser.add_argument('--covariance-update-scaling', type=float, default=1.0, metavar='FLOAT',
+                        help='modify the amount of retrieved signal that is removed from the data for iterative '
+                             'statistics updates. 1 removes identically the signal that is detected. 0 does not modify '
+                             'the data used for statistical estimates and effectively does not update the covariance '
+                             'in iterative steps (default: %(default)s)')
+    parser.add_argument('--covariance-lerp-alpha', type=float, default=0.0, metavar='FLOAT',
+                        help='modify the covariance at all iterations by emphasizing the diagonal through linearly '
+                             'interpolating non-diagonal entries to zero by this fractional weight [0, 1] '
+                             '(default: %(default)s)')
+    parser.add_argument('--use-wavelength-range', type=float, default=(2122, 2488), nargs=2, metavar=('MIN', 'MAX'),
+                        help='defines what contiguous range of wavelengths (in nanometers) should be included in the '
+                             'filter calculation (default: %(default)s nm)')
+    parser.add_argument('--visible-mask-growing-threshold', type=float, default=9.0, metavar='FLOAT',
+                        help='restrict mask dilation to only occur when 500 nm radiance is less than this value')
     # The saturation argument is required only if the saturation threshold or window has been specified.
     # Save all (potentially) required arguments until after this initial parse so that we can pass without errors.
     args, rem_args = parser.parse_known_args()
@@ -574,8 +585,10 @@ def main():
                                                                              args.saturationwindow is not None or
                                                                              args.maskgrowradius is not None or
                                                                              args.mingrowarea is not None),
-                        help='enable saturation detection (and avoid processing such pixels). This flag overrides '
-                             'any batch size setting to 1. Required if any saturation related flags are provided. '
+                        help='enable saturation detection and masking - masked pixels are excluded from statistical '
+                             'calculations that influence all pixels, but the statistics from other pixels being '
+                             'processed will be used to filter the masked pixel. This flag overrides any batch size '
+                             'setting to 1. Required if any saturation related flags are provided. '
                              '(default: %(default)s)')
     parser.add_argument('rdn', type=str, metavar='RADIANCE_FILE',
                         help='ENVI format radiance file to process -- Provide the data file itself, not the header')
@@ -767,7 +780,10 @@ def main():
         output_metadata.update({'bands': output_metadata['bands'] + 1})
         output_metadata.update({'wavelength': np.concatenate((output_metadata['wavelength'], np.asarray((2430,))))})
         hfdi_idx = output_metadata['bands'] - 1
-    output_filename = f'{args.out}.hdr'
+    if args.out is not None:
+        output_filename = f'{args.out}.hdr'
+    else:
+        output_filename = os.path.basename(args.rdn)[:len('xxxYYYYMMDDtHHMMSS')] + '_ch4_cmfr'
     output_file = spectral.io.envi.create_image(output_filename, output_metadata, force=args.overwrite, ext='')
     output_memmap = output_file.open_memmap(interleave='bip', writable=True)
     qprint(f'Filter output will be written to {output_filename}')
