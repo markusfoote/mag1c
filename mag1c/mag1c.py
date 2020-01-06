@@ -830,7 +830,7 @@ def main():
             # Flatten data into long columns, preserving first (0th) batch dimension and last (-1st) spectral dimension
             # No-op if the rdn data is already spatially flattened
             rdn_data = rdn_data.reshape((rdn_data.shape[0], np.prod(rdn_data.shape[1:-1]), rdn_data.shape[-1]))
-            sat_mask = np.ones(rdn_data.shape, dtype=np.bool)
+            sat_mask = torch.zeros(rdn_data.shape[:-1], dtype=torch.bool)  # false indicates not saturated px
         # Move data to desired compute device, and cast to appropriate data type for processing
         rdn_data = rdn_data.to(device=device, dtype=dtype)
         sat_mask = sat_mask.to(device=device, dtype=torch.bool) if sat_mask is not None else None

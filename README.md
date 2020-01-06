@@ -91,7 +91,7 @@ sparsemf ${RDN_FILE} \
   --out $OUTPUTFOLDER$(basename ${b/_rdn_/_ch4_cmfr_}) \
   --geo ${RDN_FILE/img/glt} \
   --group 1 \
-  -S \
+  --saturation \
   --saturationthreshold 6.0 \
   --maskgrowradius 150m \
   --mingrowarea 5 \
@@ -107,7 +107,7 @@ sparsemf ${RDN_FILE} \
   --out $OUTPUTFOLDER$(basename ${b/_rdn_/_ch4_cmfr_}) \
   --outputgeo ${RDN_FILE/img/glt} \
   --group 1 \
-  -S \
+  --saturation \
   --saturationthreshold 6.0 \
   --maskgrowradius 12px \
   --mingrowarea 5 \
