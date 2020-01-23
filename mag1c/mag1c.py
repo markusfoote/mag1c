@@ -555,8 +555,8 @@ def main():
                              'a combined flag for enabling mask dilation and setting the distance to dilate.')
     parser.add_argument('-A', '--mingrowarea', type=int, metavar='PX_AREA', nargs='?', const=5, default=None,
                         help='minimum number of pixels that must constitute a 2-connected saturation region for it to '
-                             'be grown by the mask-grow-radius value. If flag is provided without a value, 6 pixels '
-                             'will be assumed as the value.')
+                             'be grown by the mask-grow-radius value. If flag is provided without a value, '
+                             '%(const)s pixels will be assumed as the value.')
     parser.add_argument('--hfdi', action='store_true',
                         help='calculate the Hyperspectral Fire Detection Index (doi: 10.1016/j.rse.2009.03.010) '
                              'and append band to output.')
@@ -695,7 +695,7 @@ def main():
             if args.maskgrowradius is not None:
                 sat_mask_grow_regions = np.zeros_like(sat_mask_block, dtype=np.uint8)
                 for region in measure.regionprops(measure.label(sat_mask_block.astype(np.uint8), connectivity=2)):
-                    if region.area >= args.mingrowarea:
+                    if args.mingrowarea is None or region.area >= args.mingrowarea:
                         # Mark these large regions in the mask to get dilated
                         for c in region.coords:
                             sat_mask_grow_regions[c[0], c[1]] = 1 if block_data[c[0], c[1], idx_500] < args.visible_mask_growing_threshold else 0
