@@ -485,7 +485,10 @@ def main():
                                                  'University of Utah Albedo-Corrected Reweighted-L1 Matched Filter\n'
                                                  f'v{SCRIPT_VERSION}',
                                      epilog='When using this software, please cite: \n' +
-                                            ' Foote et al. 2019, "Title Here" doi:xxxx.xxxx\n',
+                                            ' Foote et al. 2020, "Fast and Accurate Retrieval of Methane\n'
+                                            ' Concentration from Imaging Spectrometer Data Using Sparsity Prior"\n'
+                                            ' IEEE Transactions on Geoscience and Remote Sensing. '
+                                            '   doi: 10.1109/TGRS.2020.2976888 ',
                                      formatter_class=argparse.RawDescriptionHelpFormatter,
                                      add_help=False, allow_abbrev=False)
     parser.add_argument('--spec', type=str, metavar='TARGET_SPEC_FILE',
@@ -734,7 +737,7 @@ def main():
     # Create an image file for the output
     output_metadata = {'description': 'University of Utah Albedo-Corrected Reweighted-L1 Matched Filter Result. ' +
                                       'v' + SCRIPT_VERSION +
-                                      '  Citation doi:xxxx.xxxx',
+                                      '  Foote M, et al. IEEE TGRS. 2020. doi:10.1109/TGRS.2020.2976888 ',
                        'wavelength': np.concatenate((rgb_wavelengths,
                                                      [wavelengths[np.argmin(target[:, 1])]])),
                        'wavelength units': rdn_file.metadata[
@@ -833,7 +836,7 @@ def main():
             sat_mask = torch.zeros(rdn_data.shape[:-1], dtype=torch.bool)  # false indicates not saturated px
         # Move data to desired compute device, and cast to appropriate data type for processing
         rdn_data = rdn_data.to(device=device, dtype=dtype)
-        sat_mask = sat_mask.to(device=device, dtype=torch.bool) if sat_mask is not None else None
+        sat_mask = sat_mask.to(device=device, dtype=torch.bool) if sat_mask is not None else torch.zeros(rdn_data.shape[:-1], dtype=torch.bool)
         if args.onlypositiveradiance:  # Batch size is 1, so the first dimension can be eliminated within if statement
             # Identify pixels that have all positive radiance values, filter will only be applied on these pixels
             positive_mask = torch.ge(rdn_data, 0).all(dim=2)
@@ -886,7 +889,7 @@ def main():
         else:
             # Un-flatten the (maybe multiple) columns back to their original places and write to disk
             censor_mask_bool = censor_mask.cpu().numpy() == 0
-            for i in range(args.batch):
+            for i in range(batch[0].shape[0]):
                 temp_out_reshape = NODATA * np.ones((censor_mask_bool.shape[1], col_idx.shape[1])).flatten()
                 temp_albedo_reshape = NODATA * np.ones((censor_mask_bool.shape[1], col_idx.shape[1])).flatten()
                 if args.saturation:  # Expand results back to size of censor_mask_bool, then following logic is same

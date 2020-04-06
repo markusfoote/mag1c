@@ -1,15 +1,32 @@
 # MAG1C:  Matched filter with Albedo correction and reweiGhted L1 sparsity Code
 
-[![Article DOI:10.NNN/xxxx.xxxx](https://img.shields.io/badge/Article%20DOI-10.NNN%2Fxxxx.xxxx-blue)](https://doi.org) ![GitHub release (latest SemVer including pre-releases)](https://img.shields.io/github/v/release/markusfoote/mag1c?include_prereleases&sort=semver) ![PyPI](https://img.shields.io/pypi/v/mag1c) ![PyPI - Python Version](https://img.shields.io/pypi/pyversions/mag1c) ![PyPI - License](https://img.shields.io/pypi/l/mag1c)
+[![Article DOI:10.1109/TGRS.2020.2976888](https://img.shields.io/badge/Article%20DOI-10.1109%2FTGRS.2020.2976888-blue)](https://doi.org/10.1109/TGRS.2020.2976888) [![ArXiv:2003.02978](https://img.shields.io/badge/arXiv-2003.02978-blue)](https://arxiv.org/abs/2003.02978) ![GitHub release (latest SemVer including pre-releases)](https://img.shields.io/github/v/release/markusfoote/mag1c?include_prereleases&sort=semver) ![PyPI](https://img.shields.io/pypi/v/mag1c) ![PyPI - Python Version](https://img.shields.io/pypi/pyversions/mag1c) ![PyPI - License](https://img.shields.io/pypi/l/mag1c)
 
 Fast concentration estimation and detection of trace gas absorption from imaging spectrometer data.
 
-<!--
-## Citation
-If you use this tool in a program or publication, please acknowledge its author(s) by adding the following reference:
 
-<citation here>
--->
+## Citation
+If you use this tool in a program or publication, please acknowledge our paper about this method:
+
+Foote, M. D., *et al.* "Fast and Accurate Retrieval of Methane Concentration from Imaging Spectrometer Data Using Sparsity Prior" IEEE Transactions on Geoscience and Remote Sensing. 2020.
+* bibTeX:
+  ```
+  @ARTICLE{9034492,
+  author={M. D. {Foote} and P. E. {Dennison} and A. K. {Thorpe} and D. R. {Thompson} and S. {Jongaramrungruang} and C. {Frankenberg} and S. C. {Joshi}},
+  journal={IEEE Transactions on Geoscience and Remote Sensing},
+  title={Fast and Accurate Retrieval of Methane Concentration From Imaging Spectrometer Data Using Sparsity Prior},
+  year={2020},
+  volume={},
+  number={},
+  pages={1-13},
+  keywords={Airborne Visible InfraRed Imaging Spectrometer-Next Generation (AVIRIS-NG);greenhouse gas emissions;methane mapping;plume detection.},
+  doi={10.1109/TGRS.2020.2976888},
+  ISSN={1558-0644},
+  month={},}
+  ```
+Get the article from:
+* IEEE DOI: [10.1109/TGRS.2020.2976888](https://doi.org/10.1109/TGRS.2020.2976888)
+* arXiv: [2003.02978](https://arxiv.org/abs/2003.02978)
 ## Installation
 ``pip install mag1c``
 
