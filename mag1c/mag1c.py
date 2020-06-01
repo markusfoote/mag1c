@@ -544,7 +544,7 @@ def main():
                         help='Do not write status updates to console.')
     parser.add_argument('--version', action='version',
                         version='%(prog)s \n University of Utah Albedo-Corrected Reweighted-L1 Matched Filter.\n' +
-                                f'v{SCRIPT_VERSION}\n See Foote et al. 2019 DOI: XXXx.xxxx for details.')
+                                f'v{SCRIPT_VERSION}\n See Foote et al. 2020 DOI: 10.1109/TGRS.2020.2976888 for details.')
     parser.add_argument('-T', '--saturationthreshold', type=float, metavar='THRESHOLD',
                         help='specify the threshold used for classifying pixels as saturated '
                              f'(default: {SAT_THRESH_DEFAULT})')
