@@ -1,5 +1,6 @@
 # Unit Absorption Spectrum Generation
 # Markus Foote. 2020
+# version working-1
 import numpy as np
 import scipy.ndimage
 import argparse
@@ -61,7 +62,13 @@ def spline_5deg_lookup(grid_data, zenith=0, sensor=200, ground=0, water=0, metha
     return lookup.squeeze()
 
 def load_dataset():
-    filename = 'dataset_noms.npz'
+    filename = 'dataset_ms.npz'
+    correcthash = '94559b11f7d7ff71a5cc09297f8b8611e5f4666c36e7443e6b6992d765a1c9dd'
+    import hashlib
+    with open('./dataset_ms.npz', 'rb') as f:
+        filehash = hashlib.sha256(f.read()).hexdigest()
+    if correcthash != filehash:
+        raise RuntimeError('Dataset file is invalid.')
     datafile = np.load(filename)
     return datafile['grid_5deg_data'], datafile['grid_5deg_param'], datafile['wave']
 
@@ -72,7 +79,7 @@ def generate_library(methane_vals, zenith=0, sensor=200, ground=0, water=0, orde
         rads[i, :] = spline_5deg_lookup(grid, zenith=zenith, sensor=sensor, ground=ground, water=water, methane=ppmm, order=order)
     return rads, wave
 
-def generate_template_from_bands(centers, fwhm, params):
+def generate_template_from_bands(centers, fwhm, params, **kwargs):
     """Calculate a unit absorption spectrum for methane by convolving with given band information.
 
     :param centers: wavelength values for the band centers, provided in nanometers.
@@ -91,7 +98,9 @@ def generate_template_from_bands(centers, fwhm, params):
 #                                 os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ch4.lut'))
 #     rads = np.asarray(lib.asarray()).squeeze()
 #     wave = np.asarray(lib.bands.centers)
-    concentrations = np.asarray([0, 500, 1000, 2000, 4000, 8000, 16000, 32000])
+    if 'concentrations' in kwargs and kwargs['concentrations'] is None: # Ignore None, better if it had just not been passed
+        kwargs.pop('concentrations')
+    concentrations = np.asarray(kwargs.get('concentrations', [0.0, 500, 1000, 2000, 4000, 8000, 16000, 32000]))
     rads, wave = generate_library(concentrations, **params)
     # sigma = fwhm / ( 2 * sqrt( 2 * ln(2) ) )  ~=  fwhm / 2.355
     sigma = fwhm / (2.0 * np.sqrt(2.0 * np.log(2.0)))
@@ -122,6 +131,7 @@ def main():
     parser.add_argument('--order', choices=(1,3), default=1, type=int, required=False, help='Spline interpolation degree.')
     parser.add_argument('--hdr', type=str, required=True, help='Header file for the flightline to match band centers/fwhm.')
     parser.add_argument('-o', '--output', type=str, default='generated_uas.txt', help='Output file to save spectrum.')
+    parser.add_argument('--concentrations', type=float, default=None, required=False, nargs='+', help='override the ppmm lookup values')
     args = parser.parse_args()
     param = {'zenith':args.zenith_angle, 
              'sensor':args.sensor_height,
@@ -131,7 +141,8 @@ def main():
     image = spectral.io.envi.open(args.hdr)
     centers = image.bands.centers
     fwhm = image.bands.bandwidths
-    uas = generate_template_from_bands(centers, fwhm, param)
+    concentrations = args.concentrations
+    uas = generate_template_from_bands(centers, fwhm, param, concentrations=concentrations)
     np.savetxt(args.output, uas, delimiter=' ', fmt=('%03d','% 10.3f','%.18f'))
     
     
