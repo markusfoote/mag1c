@@ -1,6 +1,6 @@
 # Unit Absorption Spectrum Generation
 # Markus Foote. 2020
-# version working-1
+# version working-2 with full modtran runs
 import numpy as np
 import scipy.ndimage
 import argparse
@@ -62,15 +62,15 @@ def spline_5deg_lookup(grid_data, zenith=0, sensor=200, ground=0, water=0, metha
     return lookup.squeeze()
 
 def load_dataset():
-    filename = 'dataset_ms.npz'
-    correcthash = '94559b11f7d7ff71a5cc09297f8b8611e5f4666c36e7443e6b6992d765a1c9dd'
+    filename = 'modtran_ch4_full/dataset_ch4_full.npz'
+    correcthash = '6d2a7f0d566e5fd45221834b409d724a5397686a1686054f3d96e1f80e2d006d'
     import hashlib
-    with open('./dataset_ms.npz', 'rb') as f:
+    with open(filename, 'rb') as f:
         filehash = hashlib.sha256(f.read()).hexdigest()
     if correcthash != filehash:
         raise RuntimeError('Dataset file is invalid.')
     datafile = np.load(filename)
-    return datafile['grid_5deg_data'], datafile['grid_5deg_param'], datafile['wave']
+    return datafile['modtran_data'], datafile['modtran_param'], datafile['wave']
 
 def generate_library(methane_vals, zenith=0, sensor=200, ground=0, water=0, order=1):
     grid, params, wave = load_dataset()
