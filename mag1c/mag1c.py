@@ -244,6 +244,7 @@ def generate_template_from_bands(centers: Union[np.ndarray, List], fwhm: Union[n
     target = np.stack((centers, spectrum)).T  # np.stack((np.arange(spectrum.shape[0]), centers, spectrum)).T
     return target
 
+
 def read_template_from_txt(txt_file: str) -> np.ndarray:
     """Reads a template spectrum stored in a .txt file, stripping band numbers from the first column.
 
@@ -398,6 +399,7 @@ class GroupedRadianceMemmappedFileDataset(torch.utils.data.Dataset):
             return data, censor_mask, col_idx, load_time, sat_mask
         return data, censor_mask, col_idx, load_time
 
+
 class GeocorrectedGroupedRadianceMemmappedFileDataset(torch.utils.data.Dataset):
     def __init__(self,
                  rdn_memmap_file: np.core.memmap,
@@ -463,6 +465,7 @@ class GeocorrectedGroupedRadianceMemmappedFileDataset(torch.utils.data.Dataset):
             return data, censor_mask, glt_idx, load_time, sat_mask
         return data, censor_mask, glt_idx, load_time
 
+
 class QuietPrinter(object):
     def __init__(self, quiet):
         self.quiet = quiet
@@ -474,7 +477,9 @@ class QuietPrinter(object):
     def set_quiet(self, be_quiet):
         self.quiet = be_quiet
 
+
 qprint = QuietPrinter(False)
+
 
 def main():
     parser = argparse.ArgumentParser(description='       M atched filter with\n'
@@ -603,13 +608,13 @@ def main():
 
     qprint.set_quiet(args.quiet)
     qprint(f'Beginning processing of {args.rdn}')
-    if args.onlypositiveradiance and args.batch is not 1:
+    if args.onlypositiveradiance and args.batch != 1:
         args.batch = 1
         qprint('Forced batch size to be 1 for positive radiance filtering.')
-    if args.saturation and args.batch is not 1:
+    if args.saturation and args.batch != 1:
         args.batch = 1
         qprint('Forced batch size to be 1 for saturation detection.')
-    if args.rdnfromgeo and args.batch is not 1:
+    if args.rdnfromgeo and args.batch != 1:
         args.batch = 1
         qprint('Forced batch size to be 1 to use geocorrected source radiance.')
     if args.rdnfromgeo is not None and args.outputgeo is not None:
