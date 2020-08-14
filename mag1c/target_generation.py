@@ -1,6 +1,6 @@
 # Unit Absorption Spectrum Generation
 # Markus Foote. 2020
-# version working-3 with full modtran runs
+# version working-4 with full modtran runs
 from os.path import exists
 import numpy as np
 import scipy.ndimage
@@ -118,7 +118,7 @@ def generate_template_from_bands(centers, fwhm, params, **kwargs):
     if 'concentrations' in kwargs and kwargs['concentrations'] is None:
         kwargs.pop('concentrations')
     concentrations = np.asarray(kwargs.get(
-        'concentrations', [0.0, 500, 1000, 2000, 4000, 8000, 16000, 32000]))
+        'concentrations', [0.0, 1000, 2000, 4000, 8000, 16000, 32000, 64000]))
     rads, wave = generate_library(concentrations, **params)
     # sigma = fwhm / ( 2 * sqrt( 2 * ln(2) ) )  ~=  fwhm / 2.355
     sigma = fwhm / (2.0 * np.sqrt(2.0 * np.log(2.0)))
@@ -147,8 +147,8 @@ def main():
         description='Create a unit absorption spectrum for specified parameters.')
     parser.add_argument('-z', '--zenith_angle', type=float, required=True,
                         help='Zenith Angle (in degrees) for generated spectrum.')
-    parser.add_argument('-s', '--sensor_height', type=float,
-                        required=True, help='Sensor Height (in km) above ground.')
+    parser.add_argument('-s', '--sensor_altitude', type=float,
+                        required=True, help='Absolute Sensor Altitude (in km) above sea level.')
     parser.add_argument('-g', '--ground_elevation', type=float,
                         required=True, help='Ground Elevation (in km).')
     parser.add_argument('-w', '--water_vapor', type=float,
@@ -166,7 +166,7 @@ def main():
                         required=False, nargs='+', help='override the ppmm lookup values')
     args = parser.parse_args()
     param = {'zenith': args.zenith_angle,
-             'sensor': args.sensor_height,
+             'sensor': args.sensor_altitude - args.ground_elevation,  # Model uses sensor height above ground
              'ground': args.ground_elevation,
              'water': args.water_vapor,
              'order': args.order}
