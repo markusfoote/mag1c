@@ -1,6 +1,7 @@
 # Unit Absorption Spectrum Generation
 # Markus Foote. 2020
-# version working-2 with full modtran runs
+# version working-3 with full modtran runs
+from os.path import exists
 import numpy as np
 import scipy.ndimage
 import argparse
@@ -129,7 +130,9 @@ def main():
     parser.add_argument('-g', '--ground_elevation', type=float, required=True, help='Ground Elevation (in km).')
     parser.add_argument('-w', '--water_vapor', type=float, required=True, help='Column water vapor (in cm).')
     parser.add_argument('--order', choices=(1,3), default=1, type=int, required=False, help='Spline interpolation degree.')
-    parser.add_argument('--hdr', type=str, required=True, help='Header file for the flightline to match band centers/fwhm.')
+    wave = parser.add_mutually_exclusive_group(required=True)
+    wave.add_argument('--hdr', type=str, help='ENVI Header file for the flightline to match band centers/fwhm.')
+    wave.add_argument('--txt', type=str, help='Text-based table for band centers/fwhm.')
     parser.add_argument('-o', '--output', type=str, default='generated_uas.txt', help='Output file to save spectrum.')
     parser.add_argument('--concentrations', type=float, default=None, required=False, nargs='+', help='override the ppmm lookup values')
     args = parser.parse_args()
@@ -138,9 +141,17 @@ def main():
              'ground':args.ground_elevation,
              'water':args.water_vapor,
              'order':args.order}
-    image = spectral.io.envi.open(args.hdr)
-    centers = image.bands.centers
-    fwhm = image.bands.bandwidths
+    print(args)
+    if args.hdr and exists(args.hdr):
+        image = spectral.io.envi.open(args.hdr)
+        centers = image.bands.centers
+        fwhm = image.bands.bandwidths
+    elif args.txt and exists(args.txt):
+        data = np.loadtxt(args.txt, usecols=(0, 1))
+        centers = data[:,0]
+        fwhm = data[:,1]
+    else:
+        raise RuntimeError('Failed to load band centers and fwhm from file. Check that the specified file exists.')
     concentrations = args.concentrations
     uas = generate_template_from_bands(centers, fwhm, param, concentrations=concentrations)
     np.savetxt(args.output, uas, delimiter=' ', fmt=('%03d','% 10.3f','%.18f'))
