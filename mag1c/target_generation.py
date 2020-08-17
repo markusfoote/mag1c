@@ -9,12 +9,12 @@ import spectral
 
 
 @np.vectorize
-def get_5deg_zenith_angle_index(zenith_value):
+def get_5deg_zenith_angle_index(zenith_value):  # [0.,5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80]
     return zenith_value / 5
 
 
 @np.vectorize
-def get_5deg_sensor_height_index(sensor_value):  # [1, 2, 4, 10, 20, 200]
+def get_5deg_sensor_height_index(sensor_value):  # [1, 2, 4, 10, 20, 120]
     # There's not really a pattern here, so just linearly interpolate between values -- piecewise linear
     if sensor_value < 1.0:
         return np.float64(0.0)
@@ -27,8 +27,8 @@ def get_5deg_sensor_height_index(sensor_value):  # [1, 2, 4, 10, 20, 200]
         return (sensor_value / 6) + (4.0 / 3.0)
     elif sensor_value < 20:
         return (sensor_value / 10) + 2
-    elif sensor_value < 200:
-        return (sensor_value / 180) + (35.0 / 9.0)
+    elif sensor_value < 120:
+        return (sensor_value / 100) + 3.8
     else:
         return 5
 
@@ -42,12 +42,12 @@ def get_5deg_ground_altitude_index(ground_value):  # [0, 0.5, 1.0, 2.0, 3.0]
 
 
 @np.vectorize
-def get_5deg_water_vapor_index(water_value):
+def get_5deg_water_vapor_index(water_value):  # [0,1,2,3,4,5,6]
     return water_value
 
 
 @np.vectorize
-def get_5deg_methane_index(methane_value):
+def get_5deg_methane_index(methane_value):  # [0.0,1000,2000,4000,8000,16000,32000,64000]
     if methane_value <= 0:
         return 0
     elif methane_value < 1000:
@@ -170,7 +170,6 @@ def main():
              'ground': args.ground_elevation,
              'water': args.water_vapor,
              'order': args.order}
-    print(args)
     if args.hdr and exists(args.hdr):
         image = spectral.io.envi.open(args.hdr)
         centers = image.bands.centers
