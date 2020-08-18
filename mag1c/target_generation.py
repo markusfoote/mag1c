@@ -1,20 +1,32 @@
 # Unit Absorption Spectrum Generation
 # Markus Foote. 2020
-# version working-4 with full modtran runs
+# version working-5 with full modtran runs and warnings
 from os.path import exists
 import numpy as np
 import scipy.ndimage
 import argparse
 import spectral
+import sys
+
+
+def check_param(value, min, max, name):
+    if value < min or value > max:
+        print(f'The value for {name} exceeds the sampled parameter space.'
+              f'The limits are[{min}, {max}], requested {value}.')
+        sys.exit()
 
 
 @np.vectorize
-def get_5deg_zenith_angle_index(zenith_value):  # [0.,5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80]
+# [0.,5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80]
+def get_5deg_zenith_angle_index(zenith_value):
+    check_param(zenith_value, 0, 80, 'Zenith Angle')
     return zenith_value / 5
 
 
 @np.vectorize
 def get_5deg_sensor_height_index(sensor_value):  # [1, 2, 4, 10, 20, 120]
+    # Only check lower bound here, atmosphere ends at 120 km so clamping there is okay.
+    check_param(sensor_value, 1, np.inf, 'Sensor Height')
     # There's not really a pattern here, so just linearly interpolate between values -- piecewise linear
     if sensor_value < 1.0:
         return np.float64(0.0)
@@ -35,6 +47,7 @@ def get_5deg_sensor_height_index(sensor_value):  # [1, 2, 4, 10, 20, 120]
 
 @np.vectorize
 def get_5deg_ground_altitude_index(ground_value):  # [0, 0.5, 1.0, 2.0, 3.0]
+    check_param(ground_value, 0, 3, 'Ground Altitude')
     if ground_value < 1:
         return 2 * ground_value
     else:
@@ -43,11 +56,15 @@ def get_5deg_ground_altitude_index(ground_value):  # [0, 0.5, 1.0, 2.0, 3.0]
 
 @np.vectorize
 def get_5deg_water_vapor_index(water_value):  # [0,1,2,3,4,5,6]
+    check_param(water_value, 0, 6, 'Water Vapor')
     return water_value
 
 
 @np.vectorize
-def get_5deg_methane_index(methane_value):  # [0.0,1000,2000,4000,8000,16000,32000,64000]
+# [0.0,1000,2000,4000,8000,16000,32000,64000]
+def get_5deg_methane_index(methane_value):
+    # the parameter clamps should rarely be calle because there are default concentrations, but the --concentraitons parameter exposes these
+    check_param(methane_value, 0, 64000, 'Methane Concentration')
     if methane_value <= 0:
         return 0
     elif methane_value < 1000:
@@ -55,7 +72,7 @@ def get_5deg_methane_index(methane_value):  # [0.0,1000,2000,4000,8000,16000,320
     return np.log2(methane_value / 500)
 
 
-def get_5deg_lookup_index(zenith=0, sensor=200, ground=0, water=0, methane=0):
+def get_5deg_lookup_index(zenith=0, sensor=120, ground=0, water=0, methane=0):
     idx = np.asarray([[get_5deg_zenith_angle_index(zenith)],
                       [get_5deg_sensor_height_index(sensor)],
                       [get_5deg_ground_altitude_index(ground)],
@@ -64,7 +81,7 @@ def get_5deg_lookup_index(zenith=0, sensor=200, ground=0, water=0, methane=0):
     return idx
 
 
-def spline_5deg_lookup(grid_data, zenith=0, sensor=200, ground=0, water=0, methane=0, order=1):
+def spline_5deg_lookup(grid_data, zenith=0, sensor=120, ground=0, water=0, methane=0, order=1):
     coords = get_5deg_lookup_index(
         zenith=zenith, sensor=sensor, ground=ground, water=water, methane=methane)
     lookup = np.asarray([scipy.ndimage.map_coordinates(
@@ -84,7 +101,7 @@ def load_dataset():
     return datafile['modtran_data'], datafile['modtran_param'], datafile['wave']
 
 
-def generate_library(methane_vals, zenith=0, sensor=200, ground=0, water=0, order=1):
+def generate_library(methane_vals, zenith=0, sensor=120, ground=0, water=0, order=1):
     grid, params, wave = load_dataset()
     rads = np.empty((len(methane_vals), grid.shape[-1]))
     for i, ppmm in enumerate(methane_vals):
@@ -166,7 +183,8 @@ def main():
                         required=False, nargs='+', help='override the ppmm lookup values')
     args = parser.parse_args()
     param = {'zenith': args.zenith_angle,
-             'sensor': args.sensor_altitude - args.ground_elevation,  # Model uses sensor height above ground
+             # Model uses sensor height above ground
+             'sensor': args.sensor_altitude - args.ground_elevation,
              'ground': args.ground_elevation,
              'water': args.water_vapor,
              'order': args.order}
