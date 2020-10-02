@@ -1,19 +1,18 @@
 # Unit Absorption Spectrum Generation
 # Markus Foote. 2020
-# version working-5 with full modtran runs and warnings
+# version working-6 with full modtran runs and warnings and optimizations
 from os.path import exists
 import numpy as np
 import scipy.ndimage
 import argparse
 import spectral
-import sys
+import h5py
 
 
 def check_param(value, min, max, name):
     if value < min or value > max:
-        print(f'The value for {name} exceeds the sampled parameter space.'
-              f'The limits are[{min}, {max}], requested {value}.')
-        sys.exit()
+        raise ValueError(f'The value for {name} exceeds the sampled parameter space.'
+                         f'The limits are[{min}, {max}], requested {value}.')
 
 
 @np.vectorize
@@ -72,45 +71,105 @@ def get_5deg_methane_index(methane_value):
     return np.log2(methane_value / 500)
 
 
-def get_5deg_lookup_index(zenith=0, sensor=120, ground=0, water=0, methane=0):
-    idx = np.asarray([[get_5deg_zenith_angle_index(zenith)],
-                      [get_5deg_sensor_height_index(sensor)],
-                      [get_5deg_ground_altitude_index(ground)],
-                      [get_5deg_water_vapor_index(water)],
-                      [get_5deg_methane_index(methane)]])
+@np.vectorize
+def get_carbon_dioxide_index(coo_value):
+    check_param(coo_value, 0, 1280000, 'Carbon Dioxode Concentration')
+    if coo_value <= 0:
+        return 0
+    elif coo_value < 20000:
+        return coo_value / 20000
+    return np.log2(coo_value / 10000)
+
+
+def get_5deg_lookup_index(zenith=0, sensor=120, ground=0, water=0, conc=0, gas='ch4'):
+    if 'ch4' in gas:
+        idx = np.asarray([[get_5deg_zenith_angle_index(zenith)],
+                          [get_5deg_sensor_height_index(sensor)],
+                          [get_5deg_ground_altitude_index(ground)],
+                          [get_5deg_water_vapor_index(water)],
+                          [get_5deg_methane_index(conc)]])
+    elif 'co2' in gas:
+        idx = np.asarray([[get_5deg_zenith_angle_index(zenith)],
+                          [get_5deg_sensor_height_index(sensor)],
+                          [get_5deg_ground_altitude_index(ground)],
+                          [get_5deg_water_vapor_index(water)],
+                          [get_carbon_dioxide_index(conc)]])
+    else:
+        raise ValueError('Unknown gas provided.')
     return idx
 
 
-def spline_5deg_lookup(grid_data, zenith=0, sensor=120, ground=0, water=0, methane=0, order=1):
+def spline_5deg_lookup(grid_data, zenith=0, sensor=120, ground=0, water=0, conc=0, gas='ch4', order=1):
     coords = get_5deg_lookup_index(
-        zenith=zenith, sensor=sensor, ground=ground, water=water, methane=methane)
-    lookup = np.asarray([scipy.ndimage.map_coordinates(
-        im, coordinates=coords, order=order, mode='nearest') for im in np.moveaxis(grid_data, 5, 0)])
+        zenith=zenith, sensor=sensor, ground=ground, water=water, conc=conc, gas=gas)
+    # correct_lookup = np.asarray([scipy.ndimage.map_coordinates(
+    #     im, coordinates=coords, order=order, mode='nearest') for im in np.moveaxis(grid_data, 5, 0)])
+    if order == 1:
+        coords_fractional_part, coords_whole_part = np.modf(coords)
+        coords_near_slice = tuple((slice(int(c), int(c+2)) for c in coords_whole_part))
+        near_grid_data = grid_data[coords_near_slice]
+        new_coord = np.concatenate((coords_fractional_part * np.ones((1, near_grid_data.shape[-1])),
+                                    np.arange(near_grid_data.shape[-1])[None, :]), axis=0)
+        lookup = scipy.ndimage.map_coordinates(near_grid_data, coordinates=new_coord, order=1, mode='nearest')
+    elif order == 3:
+        lookup = np.asarray([scipy.ndimage.map_coordinates(
+            im, coordinates=coords_fractional_part, order=order, mode='nearest') for im in np.moveaxis(near_grid_data, 5, 0)])
     return lookup.squeeze()
 
 
-def load_dataset():
-    filename = 'modtran_ch4_full/dataset_ch4_full.npz'
-    correcthash = '6d2a7f0d566e5fd45221834b409d724a5397686a1686054f3d96e1f80e2d006d'
+def load_ch4_dataset():
+    # filename = 'modtran_ch4_full/dataset_ch4_full.npz'
+    # correcthash = '6d2a7f0d566e5fd45221834b409d724a5397686a1686054f3d96e1f80e2d006d'
+    # import hashlib
+    # with open(filename, 'rb') as f:
+    #     filehash = hashlib.sha256(f.read()).hexdigest()
+    # if correcthash != filehash:
+    #     raise RuntimeError('Dataset file is invalid.')
+    # datafile = np.load(filename)
+    datafile = h5py.File('modtran_ch4_full/dataset_ch4_full.hdf5', 'r', rdcc_nbytes=4194304)
+    return datafile['modtran_data'], datafile['modtran_param'], datafile['wave'], 'ch4'
+
+
+def load_co2_dataset():
+    # filename = 'modtran_co2_full/dataset_co2_full.npz'
+    # correcthash = 'b5ce28c2fc27c1713a6175ae61c8c4b7699a431b6d309a7121919e412d608527'
+    # import hashlib
+    # with open(filename, 'rb') as f:
+    #     filehash = hashlib.sha256(f.read()).hexdigest()
+    # if correcthash != filehash:
+    #     raise RuntimeError('Dataset file is invalid.')
+    # datafile = np.load(filename)
+    datafile = h5py.File('modtran_co2_full/dataset_co2_full.hdf5', 'r', rdcc_nbytes=4194304)
+    return datafile['modtran_data'], datafile['modtran_param'], datafile['wave'], 'co2'
+
+
+def load_pca_dataset():
+    filename = 'modtran_ch4_full/dataset_ch4_pca.npz'
+    correcthash = 'd5e9849157a00c220c26a8785789137d078a00ac749cc2b59c98bc7ece932815'
     import hashlib
     with open(filename, 'rb') as f:
         filehash = hashlib.sha256(f.read()).hexdigest()
     if correcthash != filehash:
         raise RuntimeError('Dataset file is invalid.')
     datafile = np.load(filename)
-    return datafile['modtran_data'], datafile['modtran_param'], datafile['wave']
+    reconstruct = datafile['scores'].dot(datafile['components'])
+    parameters = datafile['parameters']
+    wavelengths = datafile['wavelengths']
+    simulation_spectra = reconstruct.reshape(
+        parameters.shape[:-1] + wavelengths.shape)
+    return simulation_spectra, parameters, wavelengths, 'ch4'
 
 
-def generate_library(methane_vals, zenith=0, sensor=120, ground=0, water=0, order=1):
-    grid, params, wave = load_dataset()
-    rads = np.empty((len(methane_vals), grid.shape[-1]))
-    for i, ppmm in enumerate(methane_vals):
+def generate_library(gas_concentration_vals, zenith=0, sensor=120, ground=0, water=0, order=1, dataset_fcn=load_ch4_dataset):
+    grid, params, wave, gas = dataset_fcn()
+    rads = np.empty((len(gas_concentration_vals), grid.shape[-1]))
+    for i, ppmm in enumerate(gas_concentration_vals):
         rads[i, :] = spline_5deg_lookup(
-            grid, zenith=zenith, sensor=sensor, ground=ground, water=water, methane=ppmm, order=order)
+            grid, zenith=zenith, sensor=sensor, ground=ground, water=water, conc=ppmm, gas=gas, order=order)
     return rads, wave
 
 
-def generate_template_from_bands(centers, fwhm, params, **kwargs):
+def generate_template_from_bands(centers, fwhm, params, dataset_loader, **kwargs):
     """Calculate a unit absorption spectrum for methane by convolving with given band information.
 
     :param centers: wavelength values for the band centers, provided in nanometers.
@@ -136,14 +195,15 @@ def generate_template_from_bands(centers, fwhm, params, **kwargs):
         kwargs.pop('concentrations')
     concentrations = np.asarray(kwargs.get(
         'concentrations', [0.0, 1000, 2000, 4000, 8000, 16000, 32000, 64000]))
-    rads, wave = generate_library(concentrations, **params)
+    rads, wave = generate_library(
+        concentrations, dataset_fcn=dataset_loader, **params)
     # sigma = fwhm / ( 2 * sqrt( 2 * ln(2) ) )  ~=  fwhm / 2.355
     sigma = fwhm / (2.0 * np.sqrt(2.0 * np.log(2.0)))
     # response = scipy.stats.norm.pdf(wave[:, None], loc=centers[None, :], scale=sigma[None, :])
     # Evaluate normal distribution explicitly
     var = sigma ** 2
     denom = (2 * np.pi * var) ** 0.5
-    numer = np.exp(-(wave[:, None] - centers[None, :])**2 / (2*var))
+    numer = np.exp(-(np.asarray(wave)[:, None] - centers[None, :])**2 / (2*var))
     response = numer / denom
     # Normalize each gaussian response to sum to 1.
     response = np.divide(response, response.sum(
@@ -172,15 +232,21 @@ def main():
                         required=True, help='Column water vapor (in cm).')
     parser.add_argument('--order', choices=(1, 3), default=1,
                         type=int, required=False, help='Spline interpolation degree.')
+    gas = parser.add_mutually_exclusive_group(required=False)
+    gas.add_argument('--co2', action='store_const', dest='gas', const='co2')
+    gas.add_argument('--ch4', action='store_const', dest='gas', const='ch4')
     wave = parser.add_mutually_exclusive_group(required=True)
     wave.add_argument(
         '--hdr', type=str, help='ENVI Header file for the flightline to match band centers/fwhm.')
     wave.add_argument('--txt', type=str,
                       help='Text-based table for band centers/fwhm.')
+    parser.add_argument('--source', type=str,
+                        choices=['full', 'pca'], default='full')
     parser.add_argument('-o', '--output', type=str,
                         default='generated_uas.txt', help='Output file to save spectrum.')
     parser.add_argument('--concentrations', type=float, default=None,
                         required=False, nargs='+', help='override the ppmm lookup values')
+    parser.set_defaults(gas='ch4')
     args = parser.parse_args()
     param = {'zenith': args.zenith_angle,
              # Model uses sensor height above ground
@@ -200,8 +266,12 @@ def main():
         raise RuntimeError(
             'Failed to load band centers and fwhm from file. Check that the specified file exists.')
     concentrations = args.concentrations
-    uas = generate_template_from_bands(
-        centers, fwhm, param, concentrations=concentrations)
+    if 'ch4' in args.gas:
+        dataset_fcn = load_ch4_dataset if 'full' in args.source else load_pca_dataset
+    elif 'co2' in args.gas:
+        dataset_fcn = load_co2_dataset
+    uas = generate_template_from_bands(centers, fwhm, param,
+                                       concentrations=concentrations, dataset_loader=dataset_fcn)
     np.savetxt(args.output, uas, delimiter=' ',
                fmt=('%03d', '% 10.3f', '%.18f'))
 
