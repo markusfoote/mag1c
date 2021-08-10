@@ -11,14 +11,18 @@ import h5py
 
 def check_param(value, min, max, name):
     if value < min or value > max:
-        raise ValueError(f'The value for {name} exceeds the sampled parameter space.'
-                         f'The limits are[{min}, {max}], requested {value}.')
+        print('Warning:'
+              f'The value for {name} exceeds the sampled parameter space.'
+              f'The limits are[{min}, {max}], requested {value}.')
+        # raise ValueError(f'The value for {name} exceeds the sampled parameter space.'
+        #                  f'The limits are[{min}, {max}], requested {value}.')
 
 
 @np.vectorize
 # [0.,5,10,15,20,25,30,35,40,45,50,55,60,65,70,75,80]
 def get_5deg_zenith_angle_index(zenith_value):
     check_param(zenith_value, 0, 80, 'Zenith Angle')
+    zenith_value = np.clip(zenith_value, 0, 80)
     return zenith_value / 5
 
 
@@ -26,6 +30,7 @@ def get_5deg_zenith_angle_index(zenith_value):
 def get_5deg_sensor_height_index(sensor_value):  # [1, 2, 4, 10, 20, 120]
     # Only check lower bound here, atmosphere ends at 120 km so clamping there is okay.
     check_param(sensor_value, 1, np.inf, 'Sensor Height')
+    sensor_value = np.clip(sensor_value, 1, np.inf)
     # There's not really a pattern here, so just linearly interpolate between values -- piecewise linear
     if sensor_value < 1.0:
         return np.float64(0.0)
@@ -47,6 +52,7 @@ def get_5deg_sensor_height_index(sensor_value):  # [1, 2, 4, 10, 20, 120]
 @np.vectorize
 def get_5deg_ground_altitude_index(ground_value):  # [0, 0.5, 1.0, 2.0, 3.0]
     check_param(ground_value, 0, 3, 'Ground Altitude')
+    ground_value = np.clip(ground_value, 0, 3)
     if ground_value < 1:
         return 2 * ground_value
     else:
@@ -56,6 +62,7 @@ def get_5deg_ground_altitude_index(ground_value):  # [0, 0.5, 1.0, 2.0, 3.0]
 @np.vectorize
 def get_5deg_water_vapor_index(water_value):  # [0,1,2,3,4,5,6]
     check_param(water_value, 0, 6, 'Water Vapor')
+    water_value = np.clip(water_value, 0, 6)
     return water_value
 
 
@@ -87,13 +94,13 @@ def get_5deg_lookup_index(zenith=0, sensor=120, ground=0, water=0, conc=0, gas='
                           [get_5deg_sensor_height_index(sensor)],
                           [get_5deg_ground_altitude_index(ground)],
                           [get_5deg_water_vapor_index(water)],
-                          [get_5deg_methane_index(conc)]], dtype=np.float)
+                          [get_5deg_methane_index(conc)]])
     elif 'co2' in gas:
         idx = np.asarray([[get_5deg_zenith_angle_index(zenith)],
                           [get_5deg_sensor_height_index(sensor)],
                           [get_5deg_ground_altitude_index(ground)],
                           [get_5deg_water_vapor_index(water)],
-                          [get_carbon_dioxide_index(conc)]], dtype=np.float)
+                          [get_carbon_dioxide_index(conc)]])
     else:
         raise ValueError('Unknown gas provided.')
     return idx

@@ -4,6 +4,7 @@ version.py
 .vscode
 # data files for MODTRAN runs need to be ignored
 /notebooks/*
+/test_files/*
 
 
 ## Generic python .gitignore from github
