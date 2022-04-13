@@ -786,7 +786,7 @@ def main():
     if args.out is not None:
         output_filename = f'{args.out}.hdr'
     else:
-        output_filename = os.path.basename(args.rdn)[:len('xxxYYYYMMDDtHHMMSS')] + '_ch4_cmfr'
+        output_filename = os.path.basename(args.rdn)[:len('xxxYYYYMMDDtHHMMSS')] + '_ch4_cmfr' + '.hdr'
     output_file = spectral.io.envi.create_image(output_filename, output_metadata, force=args.overwrite, ext='')
     output_memmap = output_file.open_memmap(interleave='bip', writable=True)
     qprint(f'Filter output will be written to {output_filename}')
