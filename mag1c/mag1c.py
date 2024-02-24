@@ -99,7 +99,7 @@ def acrwl1mf(x: torch.Tensor,
     device = x.device
     N = x.shape[1]  # number of samples
     if mask is None:
-        mask = torch.ones(x.shape[:-1], dtype=torch.bool)
+        mask = torch.ones(x.shape[:-1], dtype=torch.bool, device=x.device)
     mask = torch.squeeze(mask, 0)
     regularizer = torch.zeros(x.shape[0], x.shape[1], 1, dtype=dtype, device=device)
     modx = x[:, mask]#torch.zeros_like(x, dtype=dtype, device=device, layout=torch.strided)
